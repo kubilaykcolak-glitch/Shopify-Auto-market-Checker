@@ -1,0 +1,24 @@
+name = "pokeprice-sync"
+client_id = "{{ SHOPIFY_API_KEY }}"
+application_url = "{{ APP_URL }}"
+embedded = true
+
+[access_scopes]
+scopes = "read_products,write_products,read_inventory,write_inventory"
+
+[auth]
+redirect_urls = [
+  "{{ APP_URL }}/auth/callback",
+  "{{ APP_URL }}/auth/shopify/callback",
+  "{{ APP_URL }}/exitiframe"
+]
+
+[webhooks]
+api_version = "2024-01"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/webhooks/app-uninstalled"
+
+[pos]
+embedded = false

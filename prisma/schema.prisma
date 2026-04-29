@@ -1,0 +1,132 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id          String    @id
+  shop        String
+  state       String
+  isOnline    Boolean   @default(false)
+  scope       String?
+  expires     DateTime?
+  accessToken String
+  userId      BigInt?
+  firstName   String?
+  lastName    String?
+  email       String?
+  accountOwner Boolean  @default(false)
+  locale      String?
+  collaborator Boolean? @default(false)
+  emailVerified Boolean? @default(false)
+}
+
+model Store {
+  id          String   @id @default(cuid())
+  shop        String   @unique
+  accessToken String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products    TrackedProduct[]
+  rules       AutomationRule[]
+  priceLogs   PriceLog[]
+  settings    StoreSettings?
+}
+
+model StoreSettings {
+  id                  String  @id @default(cuid())
+  storeId             String  @unique
+  store               Store   @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  pollIntervalMinutes Int     @default(30)
+  emailAlerts         Boolean @default(false)
+  alertEmail          String?
+  slackWebhookUrl     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model TrackedProduct {
+  id                  String   @id @default(cuid())
+  storeId             String
+  store               Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  shopifyProductId    String
+  shopifyVariantId    String
+  shopifyProductTitle String
+  shopifyCurrentPrice Float
+
+  priceSource         String
+  externalId          String
+  externalName        String
+  cardSet             String?
+  cardNumber          String?
+  cardCondition       String   @default("near_mint")
+  isSealed            Boolean  @default(false)
+
+  ebaySearchQuery     String?
+  ebayCategoryId      String?
+
+  costPrice           Float?
+  costPriceSource     String?
+
+  baselinePrice       Float?
+  lastKnownPrice      Float?
+  lastCheckedAt       DateTime?
+
+  isActive            Boolean  @default(true)
+  isPaused            Boolean  @default(false)
+  disabledByRule      Boolean  @default(false)
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  priceLogs           PriceLog[]
+
+  @@unique([storeId, shopifyVariantId])
+}
+
+model AutomationRule {
+  id          String   @id @default(cuid())
+  storeId     String
+  store       Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  ruleType    String
+  isEnabled   Boolean  @default(true)
+
+  thresholdPct  Float?
+  thresholdAbs  Float?
+
+  action        String
+  actionValue   Float?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model PriceLog {
+  id                String   @id @default(cuid())
+  storeId           String
+  store             Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  trackedProductId  String
+  trackedProduct    TrackedProduct @relation(fields: [trackedProductId], references: [id], onDelete: Cascade)
+
+  priceSource       String
+  fetchedPrice      Float
+  previousPrice     Float?
+  changePercent     Float?
+
+  actionTaken       String?
+  actionDetail      String?
+
+  createdAt         DateTime @default(now())
+}
