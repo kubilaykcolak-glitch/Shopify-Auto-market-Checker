@@ -18,9 +18,9 @@ const shopify = shopifyApp({
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
   restResources,
-  future: {
-    unstable_newEmbeddedAuthStrategy: true,
-  },
+  // unstable_newEmbeddedAuthStrategy uses token exchange which requires
+  // a publicly reachable server. Disabled for --use-localhost dev.
+  // Re-enable when deploying to production on Fly.io.
   ...(process.env.SHOP_CUSTOM_DOMAIN
     ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
     : {}),

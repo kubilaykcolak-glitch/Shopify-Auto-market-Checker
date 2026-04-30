@@ -2,7 +2,6 @@ import { json, type LoaderFunctionArgs, type ActionFunctionArgs } from "@remix-r
 import { useLoaderData, useSubmit, useNavigation } from "@remix-run/react";
 import {
   Page,
-  Layout,
   Card,
   Text,
   BlockStack,
@@ -14,15 +13,14 @@ import {
   Banner,
   Checkbox,
   Box,
+  Collapsible,
+  Divider,
 } from "@shopify/polaris";
 import { useState } from "react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
 // ── Loader ────────────────────────────────────────────────────────────────────
-// Env var presence is checked server-side here and passed as a status object.
-// Never access process.env directly in the component — it leaks to the client
-// after hydration on some Remix setups.
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
@@ -32,7 +30,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
     include: { settings: true },
   });
 
-  const envStatus: Record<string, boolean> = {
+  // High-level integration status — what merchants care about
+  const integrationStatus = {
+    ebay: !!(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET),
+    tcgplayer: !!(process.env.TCGPLAYER_PUBLIC_KEY && process.env.TCGPLAYER_PRIVATE_KEY),
+    pricecharting: !!process.env.PRICECHARTING_API_KEY,
+    resend: !!process.env.RESEND_API_KEY,
+  };
+
+  // Actual conversion rate value for display
+  const usdToGbpRate = parseFloat(process.env.USD_TO_GBP_RATE ?? "0.79");
+
+  // Raw env var names — only surfaced in the Developer Settings section
+  const advancedEnvStatus: Record<string, boolean> = {
     EBAY_CLIENT_ID: !!process.env.EBAY_CLIENT_ID,
     EBAY_CLIENT_SECRET: !!process.env.EBAY_CLIENT_SECRET,
     TCGPLAYER_PUBLIC_KEY: !!process.env.TCGPLAYER_PUBLIC_KEY,
@@ -42,7 +52,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     USD_TO_GBP_RATE: !!process.env.USD_TO_GBP_RATE,
   };
 
-  return json({ settings: store?.settings, storeId: store?.id, envStatus });
+  return json({
+    settings: store?.settings,
+    storeId: store?.id,
+    integrationStatus,
+    usdToGbpRate,
+    advancedEnvStatus,
+  });
 }
 
 // ── Action ────────────────────────────────────────────────────────────────────
@@ -74,45 +90,7 @@ export async function action({ request }: ActionFunctionArgs) {
   return json({ success: true });
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
-
-const ENV_VAR_INFO: { key: string; desc: string; docsUrl: string }[] = [
-  {
-    key: "EBAY_CLIENT_ID",
-    desc: "eBay Browse API Client ID",
-    docsUrl: "https://developer.ebay.com/",
-  },
-  {
-    key: "EBAY_CLIENT_SECRET",
-    desc: "eBay Browse API Client Secret (Cert ID)",
-    docsUrl: "https://developer.ebay.com/",
-  },
-  {
-    key: "TCGPLAYER_PUBLIC_KEY",
-    desc: "TCGPlayer Partner API public key",
-    docsUrl: "https://developer.tcgplayer.com/",
-  },
-  {
-    key: "TCGPLAYER_PRIVATE_KEY",
-    desc: "TCGPlayer Partner API private key",
-    docsUrl: "https://developer.tcgplayer.com/",
-  },
-  {
-    key: "PRICECHARTING_API_KEY",
-    desc: "PriceCharting API key",
-    docsUrl: "https://www.pricecharting.com/api-documentation",
-  },
-  {
-    key: "RESEND_API_KEY",
-    desc: "Resend email API key (for alert emails)",
-    docsUrl: "https://resend.com/",
-  },
-  {
-    key: "USD_TO_GBP_RATE",
-    desc: "USD to GBP rate for PriceCharting (e.g. 0.79)",
-    docsUrl: "",
-  },
-];
+// ── Static data ───────────────────────────────────────────────────────────────
 
 const intervalOptions = [
   { label: "Every 15 minutes", value: "15" },
@@ -123,8 +101,45 @@ const intervalOptions = [
   { label: "Once a day", value: "1440" },
 ];
 
+const DATA_SOURCES = [
+  {
+    key: "ebay" as const,
+    name: "eBay",
+    description: "Real-time sold listing prices — best for UK market pricing",
+    docsUrl: "https://developer.ebay.com/",
+    recommended: true,
+  },
+  {
+    key: "tcgplayer" as const,
+    name: "TCGPlayer",
+    description: "Card prices from the largest TCG marketplace — requires partner approval",
+    docsUrl: "https://developer.tcgplayer.com/",
+    recommended: false,
+  },
+  {
+    key: "pricecharting" as const,
+    name: "PriceCharting",
+    description: "Sealed products and vintage card valuations",
+    docsUrl: "https://www.pricecharting.com/api-documentation",
+    recommended: false,
+  },
+];
+
+const ADVANCED_ENV_VARS = [
+  { key: "EBAY_CLIENT_ID", label: "eBay Client ID" },
+  { key: "EBAY_CLIENT_SECRET", label: "eBay Client Secret" },
+  { key: "TCGPLAYER_PUBLIC_KEY", label: "TCGPlayer Public Key" },
+  { key: "TCGPLAYER_PRIVATE_KEY", label: "TCGPlayer Private Key" },
+  { key: "PRICECHARTING_API_KEY", label: "PriceCharting API Key" },
+  { key: "RESEND_API_KEY", label: "Email Service Key" },
+  { key: "USD_TO_GBP_RATE", label: "USD → GBP Conversion Rate" },
+];
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export default function SettingsPage() {
-  const { settings, envStatus } = useLoaderData<typeof loader>();
+  const { settings, integrationStatus, usdToGbpRate, advancedEnvStatus } =
+    useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSaving = navigation.state === "submitting";
@@ -135,6 +150,7 @@ export default function SettingsPage() {
   const [emailAlerts, setEmailAlerts] = useState(settings?.emailAlerts ?? false);
   const [alertEmail, setAlertEmail] = useState(settings?.alertEmail ?? "");
   const [slackWebhook, setSlackWebhook] = useState(settings?.slackWebhookUrl ?? "");
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   function handleSave() {
     submit(
@@ -148,95 +164,268 @@ export default function SettingsPage() {
     );
   }
 
-  const missingKeys = ENV_VAR_INFO.filter((v) => !envStatus[v.key]);
+  const hasAnyDataSource =
+    integrationStatus.ebay || integrationStatus.tcgplayer || integrationStatus.pricecharting;
+
+  const overallStatus = !hasAnyDataSource
+    ? {
+        tone: "critical" as const,
+        label: "Action needed",
+        message:
+          "No price data source is connected. Connect at least one to start tracking prices.",
+      }
+    : integrationStatus.ebay
+    ? { tone: "success" as const, label: "All systems operational", message: null }
+    : {
+        tone: "warning" as const,
+        label: "Partially configured",
+        message:
+          "A data source is connected, but eBay is recommended for the best UK pricing data.",
+      };
 
   return (
     <Page title="Settings" backAction={{ content: "Dashboard", url: "/app" }}>
-      <Layout>
-        <Layout.Section>
-          <BlockStack gap="500">
+      <BlockStack gap="500">
 
-            {missingKeys.length > 0 && (
-              <Banner tone="warning" title={`${missingKeys.length} API key(s) not configured`}>
-                <p>
-                  The following environment variables are not set. Features that rely on them
-                  will not work until they are configured on your hosting platform.
-                </p>
-                <ul>
-                  {missingKeys.map((v) => (
-                    <li key={v.key}>
-                      <strong>{v.key}</strong> — {v.desc}
-                      {v.docsUrl && (
-                        <> (<a href={v.docsUrl} target="_blank" rel="noreferrer">get it here</a>)</>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </Banner>
-            )}
-
-            {/* Sync frequency */}
-            <Card>
-              <BlockStack gap="400">
-                <Text variant="headingMd" as="h2">Price Check Frequency</Text>
-                <Text tone="subdued" as="p">
-                  How often PriceSync checks prices for all tracked products. More frequent
-                  checks use more API quota — the default 30 minutes suits most stores.
+        {/* ── System Status ──────────────────────────────────────────────────── */}
+        <Card>
+          <InlineStack align="space-between" blockAlign="center">
+            <BlockStack gap="100">
+              <Text variant="headingMd" as="h2">System Status</Text>
+              {overallStatus.message ? (
+                <Text tone="subdued" variant="bodySm" as="p">
+                  {overallStatus.message}
                 </Text>
-                <Select
-                  label="Check interval"
-                  options={intervalOptions}
-                  value={pollInterval}
-                  onChange={setPollInterval}
-                />
-              </BlockStack>
-            </Card>
+              ) : (
+                <Text tone="subdued" variant="bodySm" as="p">
+                  All integrations are working correctly.
+                </Text>
+              )}
+            </BlockStack>
+            <Badge tone={overallStatus.tone} size="large">
+              {overallStatus.label}
+            </Badge>
+          </InlineStack>
+        </Card>
 
-            {/* Alerts */}
-            <Card>
-              <BlockStack gap="400">
-                <Text variant="headingMd" as="h2">Alerts & Notifications</Text>
+        {/* ── Integrations ───────────────────────────────────────────────────── */}
+        <Card>
+          <BlockStack gap="400">
+            <BlockStack gap="100">
+              <Text variant="headingMd" as="h2">Integrations</Text>
+              <Text tone="subdued" as="p">
+                Connect at least one price data source. Multiple sources can be used across
+                different products.
+              </Text>
+            </BlockStack>
 
-                <Checkbox
-                  label="Enable email alerts (requires RESEND_API_KEY)"
-                  checked={emailAlerts}
-                  onChange={setEmailAlerts}
-                />
+            <BlockStack gap="0">
+              {DATA_SOURCES.map((src, i) => {
+                const connected = integrationStatus[src.key];
+                return (
+                  <Box key={src.key}>
+                    {i > 0 && <Divider />}
+                    <Box paddingBlockStart={i > 0 ? "300" : "0"} paddingBlockEnd="300">
+                      <InlineStack align="space-between" blockAlign="center">
+                        <BlockStack gap="100">
+                          <InlineStack gap="200" blockAlign="center">
+                            <Text variant="bodyMd" fontWeight="semibold" as="span">
+                              {src.name}
+                            </Text>
+                            {src.recommended && <Badge tone="info">Recommended</Badge>}
+                          </InlineStack>
+                          <Text variant="bodySm" tone="subdued" as="p">
+                            {src.description}
+                          </Text>
+                        </BlockStack>
+                        <InlineStack gap="200" blockAlign="center">
+                          {!connected && (
+                            <Button size="slim" variant="plain" url={src.docsUrl} external>
+                              Setup guide
+                            </Button>
+                          )}
+                          <Badge tone={connected ? "success" : "warning"}>
+                            {connected ? "✓ Connected" : "Needs setup"}
+                          </Badge>
+                        </InlineStack>
+                      </InlineStack>
+                    </Box>
+                  </Box>
+                );
+              })}
+            </BlockStack>
+          </BlockStack>
+        </Card>
 
-                {emailAlerts && (
-                  <TextField
-                    label="Alert email address"
-                    type="email"
-                    value={alertEmail}
-                    onChange={setAlertEmail}
-                    autoComplete="email"
-                    helpText="You'll receive an email when an automation rule triggers a significant action."
-                  />
+        {/* ── Alerts & Notifications ──────────────────────────────────────────── */}
+        <Card>
+          <BlockStack gap="400">
+            <Text variant="headingMd" as="h2">Alerts & Notifications</Text>
+
+            {/* Email alerts */}
+            <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+              <BlockStack gap="300">
+                <InlineStack align="space-between" blockAlign="center">
+                  <BlockStack gap="050">
+                    <Text variant="bodyMd" fontWeight="semibold" as="span">
+                      Email Alerts
+                    </Text>
+                    <Text variant="bodySm" tone="subdued" as="p">
+                      {integrationStatus.resend
+                        ? "Get notified when automation rules take action"
+                        : "Email service not configured — contact your app provider to enable"}
+                    </Text>
+                  </BlockStack>
+                  <Badge
+                    tone={
+                      !integrationStatus.resend
+                        ? "new"
+                        : emailAlerts
+                        ? "success"
+                        : "warning"
+                    }
+                  >
+                    {!integrationStatus.resend
+                      ? "Not available"
+                      : emailAlerts
+                      ? "✓ Enabled"
+                      : "Disabled"}
+                  </Badge>
+                </InlineStack>
+
+                {integrationStatus.resend && (
+                  <>
+                    <Checkbox
+                      label="Enable email alerts"
+                      checked={emailAlerts}
+                      onChange={setEmailAlerts}
+                    />
+                    {emailAlerts && (
+                      <TextField
+                        label="Alert email address"
+                        type="email"
+                        value={alertEmail}
+                        onChange={setAlertEmail}
+                        autoComplete="email"
+                        helpText="You'll receive an email when a rule changes a price or sets a product out of stock."
+                      />
+                    )}
+                  </>
                 )}
+              </BlockStack>
+            </Box>
 
+            {/* Slack */}
+            <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+              <BlockStack gap="300">
+                <InlineStack align="space-between" blockAlign="center">
+                  <BlockStack gap="050">
+                    <Text variant="bodyMd" fontWeight="semibold" as="span">
+                      Slack Alerts
+                    </Text>
+                    <Text variant="bodySm" tone="subdued" as="p">
+                      Post price change notifications directly to a Slack channel
+                    </Text>
+                  </BlockStack>
+                  <Badge tone={slackWebhook ? "success" : "new"}>
+                    {slackWebhook ? "✓ Connected" : "Optional"}
+                  </Badge>
+                </InlineStack>
                 <TextField
-                  label="Slack webhook URL (optional)"
+                  label="Webhook URL"
                   value={slackWebhook}
                   onChange={setSlackWebhook}
                   autoComplete="off"
-                  helpText="Paste your Slack incoming webhook URL to receive alerts in a channel."
                   placeholder="https://hooks.slack.com/services/..."
+                  helpText={
+                    slackWebhook
+                      ? undefined
+                      : "From Slack: Apps → Incoming Webhooks → Add to Slack"
+                  }
                 />
               </BlockStack>
-            </Card>
+            </Box>
+          </BlockStack>
+        </Card>
 
-            {/* API key status */}
-            <Card>
-              <BlockStack gap="400">
-                <Text variant="headingMd" as="h2">API Key Status</Text>
-                <Banner tone="info" title="API keys are environment variables">
+        {/* ── App Settings ───────────────────────────────────────────────────── */}
+        <Card>
+          <BlockStack gap="400">
+            <Text variant="headingMd" as="h2">App Settings</Text>
+
+            <Select
+              label="Price check frequency"
+              options={intervalOptions}
+              value={pollInterval}
+              onChange={setPollInterval}
+              helpText="How often your tracked products are checked against live market data. More frequent checks consume more API quota."
+            />
+
+            {/* Currency — display only */}
+            <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+              <InlineStack align="space-between" blockAlign="center">
+                <BlockStack gap="050">
+                  <Text variant="bodyMd" fontWeight="semibold" as="span">
+                    Currency Settings
+                  </Text>
+                  <Text variant="bodySm" tone="subdued" as="p">
+                    PriceCharting data is returned in USD and automatically converted
+                  </Text>
+                </BlockStack>
+                <BlockStack gap="050">
+                  <Text variant="bodySm" fontWeight="semibold" as="span" alignment="end">
+                    GBP (£)
+                  </Text>
+                  <Text variant="bodySm" tone="subdued" as="span" alignment="end">
+                    1 USD = £{usdToGbpRate.toFixed(2)}
+                  </Text>
+                </BlockStack>
+              </InlineStack>
+            </Box>
+          </BlockStack>
+        </Card>
+
+        {/* ── Save ───────────────────────────────────────────────────────────── */}
+        <InlineStack>
+          <Button variant="primary" onClick={handleSave} loading={isSaving}>
+            Save settings
+          </Button>
+        </InlineStack>
+
+        {/* ── Developer Settings ─────────────────────────────────────────────── */}
+        <Card>
+          <BlockStack gap="400">
+            <InlineStack align="space-between" blockAlign="center">
+              <BlockStack gap="050">
+                <Text variant="headingMd" as="h2">Developer Settings</Text>
+                <Text variant="bodySm" tone="subdued" as="p">
+                  Technical configuration — for app administrators only
+                </Text>
+              </BlockStack>
+              <Button
+                size="slim"
+                variant="plain"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+              >
+                {showAdvanced ? "Hide details" : "Show details"}
+              </Button>
+            </InlineStack>
+
+            <Collapsible
+              open={showAdvanced}
+              id="developer-settings"
+              transition={{ duration: "200ms", timingFunction: "ease-in-out" }}
+            >
+              <BlockStack gap="300">
+                <Banner tone="info">
                   <p>
-                    For security, API keys are never stored in the database. Configure them as
-                    environment variables on your hosting platform (Fly.io, Railway, etc.).
+                    API credentials are set as environment variables on the server and are never
+                    stored in the database. Update them via your hosting platform (Fly.io, Railway,
+                    etc.) and redeploy to apply changes.
                   </p>
                 </Banner>
                 <BlockStack gap="200">
-                  {ENV_VAR_INFO.map(({ key, desc }) => (
+                  {ADVANCED_ENV_VARS.map(({ key, label }) => (
                     <Box
                       key={key}
                       padding="200"
@@ -246,31 +435,25 @@ export default function SettingsPage() {
                       <InlineStack align="space-between">
                         <BlockStack gap="050">
                           <Text as="span" variant="bodyMd" fontWeight="semibold">
-                            {key}
+                            {label}
                           </Text>
                           <Text as="span" variant="bodySm" tone="subdued">
-                            {desc}
+                            {key}
                           </Text>
                         </BlockStack>
-                        <Badge tone={envStatus[key] ? "success" : "critical"}>
-                          {envStatus[key] ? "Set" : "Missing"}
+                        <Badge tone={advancedEnvStatus[key] ? "success" : "critical"}>
+                          {advancedEnvStatus[key] ? "Set" : "Not set"}
                         </Badge>
                       </InlineStack>
                     </Box>
                   ))}
                 </BlockStack>
               </BlockStack>
-            </Card>
-
-            <InlineStack>
-              <Button variant="primary" onClick={handleSave} loading={isSaving}>
-                Save settings
-              </Button>
-            </InlineStack>
-
+            </Collapsible>
           </BlockStack>
-        </Layout.Section>
-      </Layout>
+        </Card>
+
+      </BlockStack>
     </Page>
   );
 }

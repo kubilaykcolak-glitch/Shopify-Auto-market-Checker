@@ -6,7 +6,21 @@ import type { LoaderFunctionArgs } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  await authenticate.admin(request);
+  try {
+    await authenticate.admin(request);
+  } catch (err: unknown) {
+    // Log the full error to the dev-server terminal so we can see the root cause
+    if (err instanceof Response) {
+      const body = await err.clone().text();
+      console.error("[AUTH] Response thrown:", err.status, body);
+    } else if (err instanceof Error) {
+      console.error("[AUTH] Error thrown:", err.message);
+      console.error(err.stack);
+    } else {
+      console.error("[AUTH] Unknown thrown:", err);
+    }
+    throw err;
+  }
   return null;
 }
 

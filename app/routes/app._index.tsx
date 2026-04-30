@@ -39,6 +39,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
   });
 
+  const enabledRulesCount = await prisma.automationRule.count({
+    where: { storeId: store.id, isEnabled: true },
+  });
+
+  // Checked server-side so env vars never leak to client
+  const integrationStatus = {
+    hasDataSource: !!(
+      (process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET) ||
+      (process.env.TCGPLAYER_PUBLIC_KEY && process.env.TCGPLAYER_PRIVATE_KEY) ||
+      process.env.PRICECHARTING_API_KEY
+    ),
+  };
+
   const totalProducts = store.products.length;
   const activeProducts = store.products.filter((p) => p.isActive && !p.isPaused).length;
   const disabledProducts = store.products.filter((p) => p.disabledByRule).length;
@@ -54,6 +67,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     products: store.products,
     recentLogs: store.priceLogs.slice(0, 20),
     stats: { totalProducts, activeProducts, disabledProducts, updatesToday },
+    enabledRulesCount,
+    integrationStatus,
   });
 }
 
@@ -71,8 +86,24 @@ export async function action({ request }: ActionFunctionArgs) {
   return json({ success: false });
 }
 
+// Human-readable action labels for the activity log
+const ACTION_LABELS: Record<string, string> = {
+  price_updated: "Price updated",
+  product_disabled: "Set out of stock",
+  floor_applied: "Floor price applied",
+  notified: "Alert sent",
+  nothing: "No change",
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  tcgplayer: "TCGPlayer",
+  ebay: "eBay",
+  pricecharting: "PriceCharting",
+};
+
 export default function Dashboard() {
-  const { storeId, shop, products, recentLogs, stats } = useLoaderData<typeof loader>();
+  const { storeId, shop, products, recentLogs, stats, enabledRulesCount, integrationStatus } =
+    useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSyncing = navigation.state === "submitting";
@@ -81,15 +112,46 @@ export default function Dashboard() {
     submit({ intent: "sync_now", storeId }, { method: "POST" });
   }
 
+  // ── Onboarding steps ────────────────────────────────────────────────────────
+  const setupSteps = [
+    {
+      label: "Connect a price data source",
+      detail: "eBay, TCGPlayer, or PriceCharting",
+      complete: integrationStatus.hasDataSource,
+      action: "Go to Settings",
+      url: "/app/settings",
+    },
+    {
+      label: "Link your first product",
+      detail: "Connect a Shopify product to live pricing data",
+      complete: products.length > 0,
+      action: "Link product",
+      url: "/app/products/new",
+    },
+    {
+      label: "Set up an automation rule",
+      detail: "Auto-update prices or get alerts on market changes",
+      complete: enabledRulesCount > 0,
+      action: "Add rule",
+      url: "/app/rules",
+    },
+  ];
+
+  const completedSteps = setupSteps.filter((s) => s.complete).length;
+  const allStepsComplete = completedSteps === setupSteps.length;
+
+  // ── Table rows ──────────────────────────────────────────────────────────────
   const productRows: React.ReactNode[][] = products.map((p) => [
     <Button key={`title-${p.id}`} variant="plain" url={`/app/products/${p.id}`}>
       {p.shopifyProductTitle}{p.cardSet ? ` — ${p.cardSet}` : ""}
     </Button>,
-    <Badge key={`src-${p.id}`} tone="info">{p.priceSource}</Badge>,
+    <Badge key={`src-${p.id}`} tone="info">
+      {SOURCE_LABELS[p.priceSource] ?? p.priceSource}
+    </Badge>,
     p.lastKnownPrice != null ? `£${p.lastKnownPrice.toFixed(2)}` : "—",
     p.lastCheckedAt ? new Date(p.lastCheckedAt).toLocaleTimeString("en-GB") : "Never",
     p.disabledByRule ? (
-      <Badge key={`s-${p.id}`} tone="critical">Disabled</Badge>
+      <Badge key={`s-${p.id}`} tone="critical">Out of stock</Badge>
     ) : p.isPaused ? (
       <Badge key={`s-${p.id}`} tone="warning">Paused</Badge>
     ) : (
@@ -101,62 +163,160 @@ export default function Dashboard() {
     new Date(log.createdAt).toLocaleString("en-GB"),
     log.actionDetail?.split(":")[0] ?? "—",
     log.changePercent != null ? (
-      <Text as="span" tone={log.changePercent >= 0 ? "success" : "critical"} key={`chg-${log.id}`}>
-        {log.changePercent >= 0 ? "+" : ""}{log.changePercent.toFixed(1)}%
+      <Text
+        as="span"
+        tone={log.changePercent >= 0 ? "success" : "critical"}
+        key={`chg-${log.id}`}
+      >
+        {log.changePercent >= 0 ? "+" : ""}
+        {log.changePercent.toFixed(1)}%
       </Text>
-    ) : "—",
+    ) : (
+      "—"
+    ),
     `£${log.fetchedPrice.toFixed(2)}`,
     <Badge
       key={`act-${log.id}`}
       tone={
-        log.actionTaken === "price_updated" ? "success" :
-        log.actionTaken === "product_disabled" ? "critical" :
-        log.actionTaken === "floor_applied" ? "warning" : "info"
+        log.actionTaken === "price_updated"
+          ? "success"
+          : log.actionTaken === "product_disabled"
+          ? "critical"
+          : log.actionTaken === "floor_applied"
+          ? "warning"
+          : "info"
       }
     >
-      {log.actionTaken ?? "nothing"}
+      {ACTION_LABELS[log.actionTaken ?? ""] ?? log.actionTaken ?? "—"}
     </Badge>,
   ]);
 
   return (
     <Page
-      title="PriceSync Dashboard"
-      subtitle={`Connected to ${shop}`}
-      primaryAction={{ content: "Sync Now", onAction: handleSyncNow, loading: isSyncing }}
+      title="Dashboard"
+      subtitle={shop}
+      primaryAction={{ content: "Sync now", onAction: handleSyncNow, loading: isSyncing }}
       secondaryActions={[
-        { content: "Add Product", url: "/app/products/new" },
-        { content: "Automation Rules", url: "/app/rules" },
+        { content: "Link product", url: "/app/products/new" },
+        { content: "Rules", url: "/app/rules" },
         { content: "Settings", url: "/app/settings" },
       ]}
     >
       <BlockStack gap="500">
 
-        {/* Stats row — 4 equal-width cards using InlineStack */}
+        {/* ── Onboarding ─────────────────────────────────────────────────────── */}
+        {!allStepsComplete && (
+          <Card>
+            <BlockStack gap="400">
+              <InlineStack align="space-between" blockAlign="center">
+                <BlockStack gap="050">
+                  <Text variant="headingMd" as="h2">Getting started</Text>
+                  <Text tone="subdued" variant="bodySm" as="p">
+                    Complete these steps to start tracking prices automatically.
+                  </Text>
+                </BlockStack>
+                <Badge tone={completedSteps === 0 ? "warning" : "info"}>
+                  {completedSteps} of {setupSteps.length} complete
+                </Badge>
+              </InlineStack>
+
+              <BlockStack gap="200">
+                {setupSteps.map((step) => (
+                  <Box
+                    key={step.label}
+                    padding="300"
+                    background={
+                      step.complete ? "bg-surface-success-subdued" : "bg-surface-secondary"
+                    }
+                    borderRadius="200"
+                  >
+                    <InlineStack align="space-between" blockAlign="center">
+                      <InlineStack gap="300" blockAlign="center">
+                        <Text as="span" variant="bodyMd">
+                          {step.complete ? "✅" : "⬜"}
+                        </Text>
+                        <BlockStack gap="050">
+                          <Text
+                            as="span"
+                            variant="bodyMd"
+                            fontWeight={step.complete ? "regular" : "semibold"}
+                            tone={step.complete ? "subdued" : undefined}
+                          >
+                            {step.label}
+                          </Text>
+                          <Text as="span" variant="bodySm" tone="subdued">
+                            {step.detail}
+                          </Text>
+                        </BlockStack>
+                      </InlineStack>
+                      {!step.complete && (
+                        <Button size="slim" url={step.url}>
+                          {step.action}
+                        </Button>
+                      )}
+                    </InlineStack>
+                  </Box>
+                ))}
+              </BlockStack>
+            </BlockStack>
+          </Card>
+        )}
+
+        {/* ── Stats row ──────────────────────────────────────────────────────── */}
         <InlineStack gap="400" wrap={false}>
           {[
-            { label: "Tracked products", value: String(stats.totalProducts), sub: `${stats.activeProducts} active` },
-            { label: "Price updates today", value: String(stats.updatesToday), sub: "Auto-applied" },
-            { label: "Disabled by rule", value: String(stats.disabledProducts), sub: "Need review", critical: stats.disabledProducts > 0 },
-            { label: "Data sources", value: "3", sub: "eBay · TCGPlayer · PriceCharting" },
+            {
+              label: "Tracked products",
+              value: String(stats.totalProducts),
+              sub: stats.activeProducts > 0 ? `${stats.activeProducts} active` : "None active",
+            },
+            {
+              label: "Price updates today",
+              value: String(stats.updatesToday),
+              sub: "Auto-applied by rules",
+            },
+            {
+              label: "Out of stock",
+              value: String(stats.disabledProducts),
+              sub: stats.disabledProducts > 0 ? "Needs your attention" : "All products in stock",
+              critical: stats.disabledProducts > 0,
+            },
+            {
+              label: "Active rules",
+              value: String(enabledRulesCount),
+              sub: enabledRulesCount > 0 ? "Monitoring prices" : "No rules configured",
+            },
           ].map(({ label, value, sub, critical }) => (
             <Box key={label} width="25%">
               <Card>
                 <BlockStack gap="200">
-                  <Text variant="bodySm" tone="subdued" as="p">{label}</Text>
-                  <Text variant="heading2xl" as="p" tone={critical ? "critical" : undefined}>{value}</Text>
-                  <Text variant="bodySm" tone="subdued" as="p">{sub}</Text>
+                  <Text variant="bodySm" tone="subdued" as="p">
+                    {label}
+                  </Text>
+                  <Text
+                    variant="heading2xl"
+                    as="p"
+                    tone={critical ? "critical" : undefined}
+                  >
+                    {value}
+                  </Text>
+                  <Text variant="bodySm" tone="subdued" as="p">
+                    {sub}
+                  </Text>
                 </BlockStack>
               </Card>
             </Box>
           ))}
         </InlineStack>
 
-        {/* Products table */}
+        {/* ── Products table ─────────────────────────────────────────────────── */}
         <Card>
           <BlockStack gap="400">
             <InlineStack align="space-between">
               <Text variant="headingMd" as="h2">Tracked Products</Text>
-              <Button url="/app/products/new" variant="primary">Link new product</Button>
+              <Button url="/app/products/new" variant="primary">
+                Link new product
+              </Button>
             </InlineStack>
 
             {products.length === 0 ? (
@@ -165,7 +325,9 @@ export default function Dashboard() {
                 action={{ content: "Link your first product", url: "/app/products/new" }}
                 image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
               >
-                <p>Connect your Shopify products to live Pokémon price sources to get started.</p>
+                <p>
+                  Connect your Shopify products to live market price sources to start tracking.
+                </p>
               </EmptyState>
             ) : (
               <DataTable
@@ -177,7 +339,7 @@ export default function Dashboard() {
           </BlockStack>
         </Card>
 
-        {/* Activity log */}
+        {/* ── Activity log ───────────────────────────────────────────────────── */}
         {recentLogs.length > 0 && (
           <Card>
             <BlockStack gap="400">
