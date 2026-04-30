@@ -209,7 +209,7 @@ export default function Dashboard() {
                   </Text>
                 </BlockStack>
                 <Badge tone={completedSteps === 0 ? "warning" : "info"}>
-                  {completedSteps} of {setupSteps.length} complete
+                  {`${completedSteps} of ${setupSteps.length} complete`}
                 </Badge>
               </InlineStack>
 
@@ -219,7 +219,7 @@ export default function Dashboard() {
                     key={step.label}
                     padding="300"
                     background={
-                      step.complete ? "bg-surface-success-subdued" : "bg-surface-secondary"
+                      step.complete ? "bg-surface-success" : "bg-surface-secondary"
                     }
                     borderRadius="200"
                   >
