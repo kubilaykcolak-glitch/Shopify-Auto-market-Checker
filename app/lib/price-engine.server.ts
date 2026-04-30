@@ -236,11 +236,26 @@ async function evaluateRules(
       const floorPrice = product.costPrice * (1 + marginPct / 100);
 
       if (newPrice < floorPrice) {
-        const applied = await updateShopifyPrice(shop, accessToken, product.shopifyVariantId, floorPrice);
-        if (applied) {
-          const detail = `Floor £${floorPrice.toFixed(2)} applied (cost £${product.costPrice.toFixed(2)} + ${marginPct}% margin; market was £${newPrice.toFixed(2)})`;
-          await sendAlerts(settings, product.shopifyProductTitle, "floor_applied", detail, floorPrice, previousPrice, changePercent);
-          return { actionTaken: "floor_applied", actionDetail: detail };
+        if (rule.action === "disable_product") {
+          // Set out of stock instead of forcing the floor price
+          const disabled = await setShopifyInventory(shop, accessToken, product.shopifyVariantId, 0);
+          if (disabled) {
+            await prisma.trackedProduct.update({
+              where: { id: product.id },
+              data: { disabledByRule: true },
+            });
+            const detail = `Set out of stock: market £${newPrice.toFixed(2)} below floor £${floorPrice.toFixed(2)} (cost £${product.costPrice.toFixed(2)} + ${marginPct}% margin)`;
+            await sendAlerts(settings, product.shopifyProductTitle, "product_disabled", detail, newPrice, previousPrice, changePercent);
+            return { actionTaken: "product_disabled", actionDetail: detail };
+          }
+        } else {
+          // Default: apply floor price
+          const applied = await updateShopifyPrice(shop, accessToken, product.shopifyVariantId, floorPrice);
+          if (applied) {
+            const detail = `Floor £${floorPrice.toFixed(2)} applied (cost £${product.costPrice.toFixed(2)} + ${marginPct}% margin; market was £${newPrice.toFixed(2)})`;
+            await sendAlerts(settings, product.shopifyProductTitle, "floor_applied", detail, floorPrice, previousPrice, changePercent);
+            return { actionTaken: "floor_applied", actionDetail: detail };
+          }
         }
       }
       continue; // Floor rule checked — move to next regardless

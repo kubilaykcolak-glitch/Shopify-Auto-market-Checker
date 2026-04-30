@@ -115,6 +115,15 @@ const RULE_PRESETS = [
     thresholdPct: null,
     actionValue: 10,
   },
+  {
+    name: "Set out of stock when below floor",
+    description:
+      "If market price drops below cost + margin %, pull the product from sale entirely instead of forcing the floor price.",
+    ruleType: "price_floor",
+    action: "disable_product",
+    thresholdPct: null,
+    actionValue: 10,
+  },
 ] as const;
 
 const ruleTypeOptions = [
@@ -134,7 +143,10 @@ const actionOptions: Record<string, { label: string; value: string }[]> = {
     { label: "Disable product (set out of stock)", value: "disable_product" },
     { label: "Notify only", value: "notify_only" },
   ],
-  price_floor: [{ label: "Apply floor price (cost + margin)", value: "floor_price" }],
+  price_floor: [
+    { label: "Apply floor price (cost + margin)", value: "floor_price" },
+    { label: "Set out of stock (pull from sale below floor)", value: "disable_product" },
+  ],
   notify: [{ label: "Notify only (no price change)", value: "notify_only" }],
 };
 
