@@ -493,7 +493,13 @@ export default function NewProduct() {
                   return (
                     <ResourceItem
                       id={product.id}
-                      onClick={() => {}}
+                      onClick={() => {
+                        setSelectedIds((prev) =>
+                          prev.includes(product.id)
+                            ? prev.filter((id) => id !== product.id)
+                            : [...prev, product.id]
+                        );
+                      }}
                       media={
                         product.featuredImage ? (
                           <Thumbnail source={product.featuredImage.url} alt={product.title} size="small" />
