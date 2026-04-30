@@ -2,7 +2,7 @@
 
 client_id = "427258d58be485eaa2a43a6be570f1d9"
 name = "pokeprice-sync"
-application_url = "https://example.com"
+application_url = "https://localhost:3001/app"
 embedded = true
 
 [access_scopes]
@@ -10,20 +10,27 @@ scopes = "read_products,write_products,read_inventory,write_inventory"
 
 [auth]
 redirect_urls = [
-  "https://example.com/auth/callback",
-  "https://example.com/auth/shopify/callback",
-  "https://example.com/exitiframe",
-  "http://localhost:3000/auth/callback",
-  "http://localhost:3000/auth/shopify/callback",
-  "http://localhost:3000/exitiframe"
+  "https://localhost:3001/auth/callback",
+  "https://localhost:3001/auth/shopify/callback",
+  "https://localhost:3001/exitiframe",
+  "https://example.com/auth/callback"
 ]
 
 [webhooks]
 api_version = "2024-01"
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/app-uninstalled"
-  topics = [ "app/uninstalled" ]
+# Webhook subscriptions are disabled for local --use-localhost dev.
+# Re-add when deploying to production with a real HTTPS URL.
+# [[webhooks.subscriptions]]
+# uri = "/webhooks/app-uninstalled"
+# topics = [ "app/uninstalled" ]
 
 [pos]
 embedded = false
+
+# Web server config — required so the CLI proxy creates a default route
+# and forwards all requests (including /app) to the local Remix server.
+[[web]]
+roles = ["frontend"]
+
+[web.commands]
+dev = "npm run dev:vite"

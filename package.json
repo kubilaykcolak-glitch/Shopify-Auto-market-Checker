@@ -3,7 +3,8 @@
     "version": "1.0.0",
     "private": true,
     "scripts": {
-        "dev": "shopify app dev",
+        "dev": "shopify app dev --use-localhost --localhost-port 3001",
+        "dev:vite": "remix vite:dev",
         "build": "remix vite:build",
         "lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
         "setup": "prisma generate && prisma migrate deploy",
