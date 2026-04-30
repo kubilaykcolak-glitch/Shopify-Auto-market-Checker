@@ -16,6 +16,7 @@ import {
   Text,
   BlockStack,
   InlineStack,
+  InlineGrid,
   Button,
   TextField,
   Select,
@@ -435,16 +436,16 @@ export default function NewProduct() {
 
   return (
     <Page title="Link Products" backAction={{ content: "Dashboard", url: "/app" }}>
-      <BlockStack gap="500">
+      <InlineGrid columns={["oneHalf", "oneHalf"]} gap="500">
 
-        {/* ── Step 1: Search + Select ───────────────────────────────────────── */}
+        {/* ── LEFT: Search + Select ─────────────────────────────────────────── */}
         <Card>
           <BlockStack gap="400">
             <InlineStack align="space-between" blockAlign="center">
               <BlockStack gap="050">
-                <Text variant="headingMd" as="h2">Step 1 — Select products</Text>
+                <Text variant="headingMd" as="h2">Select products</Text>
                 <Text variant="bodySm" tone="subdued" as="p">
-                  Choose one or more products to link to live pricing data.
+                  Choose one or more products to track.
                 </Text>
               </BlockStack>
               {selectedIds.length > 0 && (
@@ -457,7 +458,6 @@ export default function NewProduct() {
               )}
             </InlineStack>
 
-            {/* Search filter */}
             <TextField
               label="Search products"
               labelHidden
@@ -520,288 +520,299 @@ export default function NewProduct() {
             {shopifyProducts.length === 250 && (
               <Banner tone="warning">
                 <p>
-                  Showing your first 250 products. Use the search above to find products not visible in the list.
+                  Showing your first 250 products. Use the search above to find others.
                 </p>
               </Banner>
             )}
           </BlockStack>
         </Card>
 
-        {/* ── Step 2: Configure price source ───────────────────────────────── */}
-        {selectedIds.length > 0 && (
-          <Card>
-            <BlockStack gap="400">
-              <BlockStack gap="050">
-                <Text variant="headingMd" as="h2">Step 2 — Configure price source</Text>
-                {isMultiSelect && (
-                  <Text variant="bodySm" tone="subdued" as="p">
-                    These settings apply to all {selectedIds.length} selected products.
+        {/* ── RIGHT: Configure + Cost + Link ───────────────────────────────── */}
+        <BlockStack gap="400">
+          {selectedIds.length === 0 ? (
+            /* Placeholder when nothing is selected */
+            <Card>
+              <Box padding="600">
+                <BlockStack gap="200">
+                  <Text variant="bodyMd" tone="subdued" as="p" alignment="center">
+                    ← Select one or more products to configure their price source.
                   </Text>
-                )}
-              </BlockStack>
-
-              <Select
-                label="Price data source"
-                options={sourceOptions}
-                value={priceSource}
-                onChange={handleSourceChange}
-              />
-
-              {priceSource !== "ebay" && (
-                <Select
-                  label="Card condition / grade"
-                  options={conditionOptions}
-                  value={cardCondition}
-                  onChange={setCardCondition}
-                />
-              )}
-
-              {/* ── eBay ─────────────────────────────────────────────────── */}
-              {priceSource === "ebay" && (
+                </BlockStack>
+              </Box>
+            </Card>
+          ) : (
+            <>
+              {/* ── Configure price source ─────────────────────────────────── */}
+              <Card>
                 <BlockStack gap="400">
+                  <BlockStack gap="050">
+                    <Text variant="headingMd" as="h2">Configure price source</Text>
+                    {isMultiSelect && (
+                      <Text variant="bodySm" tone="subdued" as="p">
+                        Applies to all {selectedIds.length} selected products.
+                      </Text>
+                    )}
+                  </BlockStack>
+
                   <Select
-                    label="eBay category"
-                    options={ebayCategoryOptions}
-                    value={ebayCategory}
-                    onChange={(v) => { setEbayCategory(v); setEbayConfirmed(false); }}
+                    label="Price data source"
+                    options={sourceOptions}
+                    value={priceSource}
+                    onChange={handleSourceChange}
                   />
 
-                  {isMultiSelect ? (
-                    <Banner tone="info" title="Bulk eBay tracking">
-                      <p>
-                        Each product's Shopify title will be used as its eBay search query
-                        automatically. You can refine the search query for any product individually
-                        from its detail page after linking.
-                      </p>
-                    </Banner>
-                  ) : (
-                    /* Single product — keep the preview/confirm flow */
+                  {priceSource !== "ebay" && (
+                    <Select
+                      label="Card condition / grade"
+                      options={conditionOptions}
+                      value={cardCondition}
+                      onChange={setCardCondition}
+                    />
+                  )}
+
+                  {/* ── eBay ───────────────────────────────────────────────── */}
+                  {priceSource === "ebay" && (
+                    <BlockStack gap="400">
+                      <Select
+                        label="eBay category"
+                        options={ebayCategoryOptions}
+                        value={ebayCategory}
+                        onChange={(v) => { setEbayCategory(v); setEbayConfirmed(false); }}
+                      />
+
+                      {isMultiSelect ? (
+                        <Banner tone="info" title="Bulk eBay tracking">
+                          <p>
+                            Each product's Shopify title will be used as its eBay search query.
+                            You can refine per-product from the product detail page after linking.
+                          </p>
+                        </Banner>
+                      ) : (
+                        <BlockStack gap="300">
+                          <Banner tone="info" title="How eBay tracking works">
+                            <p>
+                              Enter a precise query — we lock it in and run it on every sync.
+                              Include set name, card number, and grade/condition.
+                            </p>
+                          </Banner>
+
+                          <TextField
+                            label="eBay search query"
+                            value={searchQuery}
+                            onChange={(v) => { setSearchQuery(v); setEbayConfirmed(false); }}
+                            placeholder='"Charizard Obsidian Flames 199/197 PSA 10" GBP'
+                            autoComplete="off"
+                            helpText="Include condition/grade, set name, and card number"
+                            connectedRight={
+                              <Button
+                                onClick={handleEbayPreview}
+                                loading={isSearching}
+                                disabled={!searchQuery.trim()}
+                              >
+                                Preview
+                              </Button>
+                            }
+                          />
+
+                          {hasEbayError && (
+                            <Banner tone="critical" title="eBay search failed">
+                              <p>{(actionData as any).error}</p>
+                            </Banner>
+                          )}
+
+                          {ebayPreviewListings.length > 0 && !ebayConfirmed && (
+                            <BlockStack gap="300">
+                              <Text variant="bodyMd" fontWeight="semibold" as="p">
+                                Top {ebayPreviewListings.length} recent sold listings:
+                              </Text>
+                              <DataTable
+                                columnContentTypes={["text", "text", "text", "text"]}
+                                headings={["Title", "Price", "Condition", "Date"]}
+                                rows={ebayPreviewListings.map((l) => [
+                                  <Text as="span" variant="bodySm" key={l.itemUrl}>
+                                    <Link url={l.itemUrl} external>
+                                      {l.title.length > 45 ? l.title.slice(0, 45) + "…" : l.title}
+                                    </Link>
+                                  </Text>,
+                                  `£${l.price.toFixed(2)}`,
+                                  l.condition,
+                                  l.soldDate ? new Date(l.soldDate).toLocaleDateString("en-GB") : "—",
+                                ])}
+                              />
+                              <Banner tone="warning" title="Do these look right?">
+                                <p>
+                                  If they don't match, refine your query and preview again.
+                                </p>
+                              </Banner>
+                              <InlineStack gap="300">
+                                <Button variant="primary" tone="success" onClick={() => setEbayConfirmed(true)}>
+                                  ✓ Confirm
+                                </Button>
+                                <Button onClick={() => { setSearchQuery(""); setEbayConfirmed(false); }}>
+                                  Try again
+                                </Button>
+                              </InlineStack>
+                            </BlockStack>
+                          )}
+
+                          {ebayPreviewListings.length === 0 &&
+                            actionData && "intent" in actionData &&
+                            actionData.intent === "ebay_preview" && !hasEbayError && (
+                              <Banner tone="warning" title="No results found">
+                                <p>
+                                  Try broadening the search — remove the condition/grade and search
+                                  by card name and set only.
+                                </p>
+                              </Banner>
+                            )}
+
+                          {ebayConfirmed && (
+                            <Banner tone="success" title="Search confirmed">
+                              <p>
+                                <strong>"{searchQuery}"</strong> ·{" "}
+                                {EBAY_POKEMON_CATEGORIES.find((c) => c.value === ebayCategory)?.label}
+                              </p>
+                            </Banner>
+                          )}
+                        </BlockStack>
+                      )}
+                    </BlockStack>
+                  )}
+
+                  {/* ── TCGPlayer / PriceCharting ───────────────────────────── */}
+                  {priceSource !== "ebay" && (
                     <BlockStack gap="300">
-                      <Banner tone="info" title="How eBay tracking works">
-                        <p>
-                          Enter a precise search query — the same one you'd type on eBay. We lock
-                          it in and run it on every sync. Be specific: include set name, card
-                          number, and grade/condition.
-                        </p>
-                      </Banner>
+                      {isMultiSelect && (
+                        <Banner tone="info" title="Linking multiple products">
+                          <p>
+                            The same card ID will be linked to all {selectedIds.length} selected
+                            products — useful for the same card at different conditions.
+                          </p>
+                        </Banner>
+                      )}
 
                       <TextField
-                        label="eBay search query"
+                        label="Search for this card"
                         value={searchQuery}
-                        onChange={(v) => { setSearchQuery(v); setEbayConfirmed(false); }}
-                        placeholder='"Charizard Obsidian Flames 199/197 PSA 10" GBP'
+                        onChange={setSearchQuery}
+                        placeholder="e.g. Charizard ex Obsidian Flames"
                         autoComplete="off"
-                        helpText="Include condition/grade, set name, and card number for accurate results"
                         connectedRight={
-                          <Button
-                            onClick={handleEbayPreview}
-                            loading={isSearching}
-                            disabled={!searchQuery.trim()}
-                          >
-                            Preview results
+                          <Button onClick={handleSearch} loading={isSearching}>
+                            Search
                           </Button>
                         }
                       />
 
-                      {hasEbayError && (
-                        <Banner tone="critical" title="eBay search failed">
-                          <p>{(actionData as any).error}</p>
+                      {actionData && "error" in actionData && actionData.error && (
+                        <Banner tone="critical" title="Search failed">
+                          <p>{actionData.error}</p>
                         </Banner>
                       )}
 
-                      {ebayPreviewListings.length > 0 && !ebayConfirmed && (
-                        <BlockStack gap="300">
-                          <Text variant="bodyMd" fontWeight="semibold" as="p">
-                            Top {ebayPreviewListings.length} recent sold listings for this query:
-                          </Text>
-                          <DataTable
-                            columnContentTypes={["text", "text", "text", "text"]}
-                            headings={["Title", "Sold Price", "Condition", "Sold Date"]}
-                            rows={ebayPreviewListings.map((l) => [
-                              <Text as="span" variant="bodySm" key={l.itemUrl}>
-                                <Link url={l.itemUrl} external>
-                                  {l.title.length > 60 ? l.title.slice(0, 60) + "…" : l.title}
-                                </Link>
-                              </Text>,
-                              `£${l.price.toFixed(2)}`,
-                              l.condition,
-                              l.soldDate ? new Date(l.soldDate).toLocaleDateString("en-GB") : "—",
-                            ])}
+                      {searchResults.length > 0 && (
+                        <BlockStack gap="200">
+                          <Text variant="bodyMd" as="p">Select the matching result:</Text>
+                          <ResourceList
+                            resourceName={{ singular: "result", plural: "results" }}
+                            items={searchResults}
+                            renderItem={(result: any) => (
+                              <ResourceItem id={result.id} onClick={() => setSelectedExternal(result)}>
+                                <InlineStack align="space-between">
+                                  <BlockStack gap="050">
+                                    <Text as="span" variant="bodyMd">{result.name}</Text>
+                                    {result.extra && (
+                                      <Text as="span" variant="bodySm" tone="subdued">{result.extra}</Text>
+                                    )}
+                                  </BlockStack>
+                                  {selectedExternal?.id === result.id && (
+                                    <Badge tone="success">Selected ✓</Badge>
+                                  )}
+                                </InlineStack>
+                              </ResourceItem>
+                            )}
                           />
-                          <Banner tone="warning" title="Do these results look right?">
-                            <p>
-                              Check that the listings above match the card you're tracking. If they
-                              don't, refine your query and preview again.
-                            </p>
-                          </Banner>
-                          <InlineStack gap="300">
-                            <Button variant="primary" tone="success" onClick={() => setEbayConfirmed(true)}>
-                              ✓ Looks right — confirm this search
-                            </Button>
-                            <Button onClick={() => { setSearchQuery(""); setEbayConfirmed(false); }}>
-                              Try a different query
-                            </Button>
-                          </InlineStack>
                         </BlockStack>
                       )}
-
-                      {ebayPreviewListings.length === 0 &&
-                        actionData && "intent" in actionData &&
-                        actionData.intent === "ebay_preview" && !hasEbayError && (
-                          <Banner tone="warning" title="No results found">
-                            <p>
-                              No sold listings matched this query. Try broadening the search — remove
-                              the condition/grade and search by card name and set only.
-                            </p>
-                          </Banner>
-                        )}
-
-                      {ebayConfirmed && (
-                        <Banner tone="success" title="eBay search confirmed">
-                          <p>
-                            Query locked in: <strong>"{searchQuery}"</strong> in category{" "}
-                            <strong>
-                              {EBAY_POKEMON_CATEGORIES.find((c) => c.value === ebayCategory)?.label}
-                            </strong>
-                            . This exact search will be used on every sync.
-                          </p>
-                        </Banner>
-                      )}
                     </BlockStack>
                   )}
                 </BlockStack>
-              )}
+              </Card>
 
-              {/* ── TCGPlayer / PriceCharting search ─────────────────────── */}
-              {priceSource !== "ebay" && (
-                <BlockStack gap="300">
-                  {isMultiSelect && (
-                    <Banner tone="info" title="Linking multiple products">
-                      <p>
-                        The card you select below will be linked to all {selectedIds.length} selected
-                        products — useful when the same card is tracked at different conditions or
-                        in multiple listings.
-                      </p>
-                    </Banner>
-                  )}
+              {/* ── Cost price ─────────────────────────────────────────────── */}
+              {configReady && (
+                <Card>
+                  <BlockStack gap="400">
+                    <BlockStack gap="050">
+                      <Text variant="headingMd" as="h2">Cost price (optional)</Text>
+                      <Text tone="subdued" variant="bodySm" as="p">
+                        Used with floor price rules to protect your minimum margin.
+                      </Text>
+                    </BlockStack>
 
-                  <TextField
-                    label="Search for this card"
-                    value={searchQuery}
-                    onChange={setSearchQuery}
-                    placeholder="e.g. Charizard ex Obsidian Flames"
-                    autoComplete="off"
-                    connectedRight={
-                      <Button onClick={handleSearch} loading={isSearching}>
-                        Search
-                      </Button>
-                    }
-                  />
+                    <Checkbox
+                      label={
+                        isMultiSelect
+                          ? "Use each product's Shopify cost price where available"
+                          : shopifyCostForSingle
+                          ? `Use Shopify cost price (£${shopifyCostForSingle.toFixed(2)})`
+                          : "Use Shopify cost price (not set for this product)"
+                      }
+                      checked={useShopifyCost}
+                      onChange={setUseShopifyCost}
+                      disabled={!isMultiSelect && !shopifyCostForSingle}
+                    />
 
-                  {actionData && "error" in actionData && actionData.error && (
-                    <Banner tone="critical" title="Search failed">
-                      <p>{actionData.error}</p>
-                    </Banner>
-                  )}
-
-                  {searchResults.length > 0 && (
-                    <BlockStack gap="200">
-                      <Text variant="bodyMd" as="p">Select the matching result:</Text>
-                      <ResourceList
-                        resourceName={{ singular: "result", plural: "results" }}
-                        items={searchResults}
-                        renderItem={(result: any) => (
-                          <ResourceItem id={result.id} onClick={() => setSelectedExternal(result)}>
-                            <InlineStack align="space-between">
-                              <BlockStack gap="050">
-                                <Text as="span" variant="bodyMd">{result.name}</Text>
-                                {result.extra && (
-                                  <Text as="span" variant="bodySm" tone="subdued">{result.extra}</Text>
-                                )}
-                              </BlockStack>
-                              {selectedExternal?.id === result.id && (
-                                <Badge tone="success">Selected ✓</Badge>
-                              )}
-                            </InlineStack>
-                          </ResourceItem>
-                        )}
+                    {(!useShopifyCost || isMultiSelect) && (
+                      <TextField
+                        label={
+                          isMultiSelect
+                            ? "Fallback cost price (£)"
+                            : "Cost price (£)"
+                        }
+                        type="number"
+                        value={costPriceShared}
+                        onChange={setCostPriceShared}
+                        autoComplete="off"
+                        placeholder="e.g. 12.50"
+                        prefix="£"
+                        helpText={
+                          isMultiSelect
+                            ? "Applied to products where Shopify cost is not set."
+                            : "What you paid — used as the anchor for floor price rules."
+                        }
                       />
-                    </BlockStack>
-                  )}
-                </BlockStack>
+                    )}
+                  </BlockStack>
+                </Card>
               )}
-            </BlockStack>
-          </Card>
-        )}
 
-        {/* ── Step 3: Cost price ───────────────────────────────────────────── */}
-        {configReady && (
-          <Card>
-            <BlockStack gap="400">
-              <BlockStack gap="050">
-                <Text variant="headingMd" as="h2">Step 3 — Cost price (optional)</Text>
-                <Text tone="subdued" variant="bodySm" as="p">
-                  Used with floor price rules to prevent selling below a minimum margin. Leave blank
-                  if you don't use floor rules.
-                </Text>
-              </BlockStack>
-
-              <Checkbox
-                label={
-                  isMultiSelect
-                    ? "Use each product's Shopify cost price where available"
-                    : shopifyCostForSingle
-                    ? `Use Shopify cost price (£${shopifyCostForSingle.toFixed(2)})`
-                    : "Use Shopify cost price (not set for this product)"
-                }
-                checked={useShopifyCost}
-                onChange={setUseShopifyCost}
-                disabled={!isMultiSelect && !shopifyCostForSingle}
-              />
-
-              {(!useShopifyCost || isMultiSelect) && (
-                <TextField
-                  label={
-                    isMultiSelect
-                      ? "Fallback cost price (£) — applied where Shopify cost is not set"
-                      : "Cost price (£)"
-                  }
-                  type="number"
-                  value={costPriceShared}
-                  onChange={setCostPriceShared}
-                  autoComplete="off"
-                  placeholder="e.g. 12.50"
-                  prefix="£"
-                  helpText="What you paid for the item — used as the anchor for floor price rules."
-                />
+              {/* ── Link button ─────────────────────────────────────────────── */}
+              {configReady && (
+                <InlineStack gap="300">
+                  <Button variant="primary" onClick={handleLink} loading={isLinking}>
+                    {selectedIds.length > 1
+                      ? `Link ${selectedIds.length} products`
+                      : "Link product"}
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      setSelectedIds([]);
+                      setSelectedExternal(null);
+                      setEbayConfirmed(false);
+                      setSearchQuery("");
+                      setCostPriceShared("");
+                    }}
+                  >
+                    Clear selection
+                  </Button>
+                </InlineStack>
               )}
-            </BlockStack>
-          </Card>
-        )}
+            </>
+          )}
+        </BlockStack>
 
-        {/* ── Link button ──────────────────────────────────────────────────── */}
-        {configReady && (
-          <InlineStack gap="300">
-            <Button variant="primary" onClick={handleLink} loading={isLinking}>
-              {selectedIds.length > 1
-                ? `Link ${selectedIds.length} products`
-                : "Link product"}
-            </Button>
-            <Button
-              onClick={() => {
-                setSelectedIds([]);
-                setSelectedExternal(null);
-                setEbayConfirmed(false);
-                setSearchQuery("");
-                setCostPriceShared("");
-              }}
-            >
-              Clear selection
-            </Button>
-          </InlineStack>
-        )}
-
-      </BlockStack>
+      </InlineGrid>
     </Page>
   );
 }
