@@ -143,7 +143,7 @@ async function setShopifyInventory(
 
 // ── Alert helper ─────────────────────────────────────────────────────────────
 
-type AlertSettings = Pick<StoreSettings, "emailAlerts" | "alertEmail" | "slackWebhookUrl">;
+type AlertSettings = Pick<StoreSettings, "emailAlerts" | "alertEmail" | "slackWebhookUrl" | "discordWebhookUrl">;
 
 async function sendAlerts(
   settings: AlertSettings,
@@ -173,6 +173,28 @@ async function sendAlerts(
       });
     } catch (e) {
       console.error("[PriceEngine] Slack alert failed:", e);
+    }
+  }
+
+  // Discord webhook
+  if (settings.discordWebhookUrl) {
+    const sign = changePercent >= 0 ? "+" : "";
+    try {
+      await fetch(settings.discordWebhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: [
+            `🃏 **PriceSync Alert**`,
+            `**Product:** ${productTitle}`,
+            `**Action:** ${actionTaken.replace(/_/g, " ")}`,
+            `**Detail:** ${actionDetail}`,
+            `Prev: £${previousPrice.toFixed(2)} → New: £${newPrice.toFixed(2)} (${sign}${changePercent.toFixed(1)}%)`,
+          ].join("\n"),
+        }),
+      });
+    } catch (e) {
+      console.error("[PriceEngine] Discord alert failed:", e);
     }
   }
 
@@ -398,6 +420,7 @@ export async function runSyncForStore(storeId: string): Promise<void> {
     emailAlerts: false,
     alertEmail: null,
     slackWebhookUrl: null,
+    discordWebhookUrl: null,
   };
 
   console.log(

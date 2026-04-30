@@ -49,6 +49,7 @@ model StoreSettings {
   emailAlerts         Boolean @default(false)
   alertEmail          String?
   slackWebhookUrl     String?
+  discordWebhookUrl   String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 }

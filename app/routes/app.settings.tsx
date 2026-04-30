@@ -76,6 +76,7 @@ export async function action({ request }: ActionFunctionArgs) {
       emailAlerts: formData.get("emailAlerts") === "true",
       alertEmail: (formData.get("alertEmail") as string) || null,
       slackWebhookUrl: (formData.get("slackWebhookUrl") as string) || null,
+      discordWebhookUrl: (formData.get("discordWebhookUrl") as string) || null,
     },
     create: {
       storeId: store.id,
@@ -83,6 +84,7 @@ export async function action({ request }: ActionFunctionArgs) {
       emailAlerts: formData.get("emailAlerts") === "true",
       alertEmail: (formData.get("alertEmail") as string) || null,
       slackWebhookUrl: (formData.get("slackWebhookUrl") as string) || null,
+      discordWebhookUrl: (formData.get("discordWebhookUrl") as string) || null,
     },
   });
 
@@ -122,6 +124,7 @@ export default function SettingsPage() {
   const [emailAlerts, setEmailAlerts] = useState(settings?.emailAlerts ?? false);
   const [alertEmail, setAlertEmail] = useState(settings?.alertEmail ?? "");
   const [slackWebhook, setSlackWebhook] = useState(settings?.slackWebhookUrl ?? "");
+  const [discordWebhook, setDiscordWebhook] = useState(settings?.discordWebhookUrl ?? "");
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   function handleSave() {
@@ -131,6 +134,7 @@ export default function SettingsPage() {
         emailAlerts: String(emailAlerts),
         alertEmail,
         slackWebhookUrl: slackWebhook,
+        discordWebhookUrl: discordWebhook,
       },
       { method: "POST" }
     );
@@ -248,6 +252,37 @@ export default function SettingsPage() {
                     slackWebhook
                       ? undefined
                       : "From Slack: Apps → Incoming Webhooks → Add to Slack"
+                  }
+                />
+              </BlockStack>
+            </Box>
+
+            {/* Discord */}
+            <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+              <BlockStack gap="300">
+                <InlineStack align="space-between" blockAlign="center">
+                  <BlockStack gap="050">
+                    <Text variant="bodyMd" fontWeight="semibold" as="span">
+                      Discord Alerts
+                    </Text>
+                    <Text variant="bodySm" tone="subdued" as="p">
+                      Post price change notifications to a Discord channel
+                    </Text>
+                  </BlockStack>
+                  <Badge tone={discordWebhook ? "success" : "new"}>
+                    {discordWebhook ? "✓ Connected" : "Optional"}
+                  </Badge>
+                </InlineStack>
+                <TextField
+                  label="Webhook URL"
+                  value={discordWebhook}
+                  onChange={setDiscordWebhook}
+                  autoComplete="off"
+                  placeholder="https://discord.com/api/webhooks/..."
+                  helpText={
+                    discordWebhook
+                      ? undefined
+                      : "In Discord: channel Settings → Integrations → Webhooks → New Webhook → Copy URL"
                   }
                 />
               </BlockStack>
