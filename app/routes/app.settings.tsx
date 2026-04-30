@@ -14,7 +14,6 @@ import {
   Checkbox,
   Box,
   Collapsible,
-  Divider,
 } from "@shopify/polaris";
 import { useState } from "react";
 import { authenticate } from "../shopify.server";
@@ -101,30 +100,6 @@ const intervalOptions = [
   { label: "Once a day", value: "1440" },
 ];
 
-const DATA_SOURCES = [
-  {
-    key: "ebay" as const,
-    name: "eBay",
-    description: "Real-time sold listing prices — best for UK market pricing",
-    docsUrl: "https://developer.ebay.com/",
-    recommended: true,
-  },
-  {
-    key: "tcgplayer" as const,
-    name: "TCGPlayer",
-    description: "Card prices from the largest TCG marketplace — requires partner approval",
-    docsUrl: "https://developer.tcgplayer.com/",
-    recommended: false,
-  },
-  {
-    key: "pricecharting" as const,
-    name: "PriceCharting",
-    description: "Sealed products and vintage card valuations",
-    docsUrl: "https://www.pricecharting.com/api-documentation",
-    recommended: false,
-  },
-];
-
 const ADVANCED_ENV_VARS = [
   { key: "EBAY_CLIENT_ID", label: "eBay Client ID" },
   { key: "EBAY_CLIENT_SECRET", label: "eBay Client Secret" },
@@ -167,21 +142,9 @@ export default function SettingsPage() {
   const hasAnyDataSource =
     integrationStatus.ebay || integrationStatus.tcgplayer || integrationStatus.pricecharting;
 
-  const overallStatus = !hasAnyDataSource
-    ? {
-        tone: "critical" as const,
-        label: "Action needed",
-        message:
-          "No price data source is connected. Connect at least one to start tracking prices.",
-      }
-    : integrationStatus.ebay
-    ? { tone: "success" as const, label: "All systems operational", message: null }
-    : {
-        tone: "warning" as const,
-        label: "Partially configured",
-        message:
-          "A data source is connected, but eBay is recommended for the best UK pricing data.",
-      };
+  const overallStatus = hasAnyDataSource
+    ? { tone: "success" as const, label: "Operational" }
+    : { tone: "warning" as const, label: "Service unavailable" };
 
   return (
     <Page title="Settings" backAction={{ content: "Dashboard", url: "/app" }}>
@@ -192,69 +155,16 @@ export default function SettingsPage() {
           <InlineStack align="space-between" blockAlign="center">
             <BlockStack gap="100">
               <Text variant="headingMd" as="h2">System Status</Text>
-              {overallStatus.message ? (
-                <Text tone="subdued" variant="bodySm" as="p">
-                  {overallStatus.message}
-                </Text>
-              ) : (
-                <Text tone="subdued" variant="bodySm" as="p">
-                  All integrations are working correctly.
-                </Text>
-              )}
+              <Text tone="subdued" variant="bodySm" as="p">
+                {hasAnyDataSource
+                  ? "Price data services are running normally."
+                  : "Price data services are currently unavailable. Please contact support."}
+              </Text>
             </BlockStack>
             <Badge tone={overallStatus.tone} size="large">
               {overallStatus.label}
             </Badge>
           </InlineStack>
-        </Card>
-
-        {/* ── Integrations ───────────────────────────────────────────────────── */}
-        <Card>
-          <BlockStack gap="400">
-            <BlockStack gap="100">
-              <Text variant="headingMd" as="h2">Integrations</Text>
-              <Text tone="subdued" as="p">
-                Connect at least one price data source. Multiple sources can be used across
-                different products.
-              </Text>
-            </BlockStack>
-
-            <BlockStack gap="0">
-              {DATA_SOURCES.map((src, i) => {
-                const connected = integrationStatus[src.key];
-                return (
-                  <Box key={src.key}>
-                    {i > 0 && <Divider />}
-                    <Box paddingBlockStart={i > 0 ? "300" : "0"} paddingBlockEnd="300">
-                      <InlineStack align="space-between" blockAlign="center">
-                        <BlockStack gap="100">
-                          <InlineStack gap="200" blockAlign="center">
-                            <Text variant="bodyMd" fontWeight="semibold" as="span">
-                              {src.name}
-                            </Text>
-                            {src.recommended && <Badge tone="info">Recommended</Badge>}
-                          </InlineStack>
-                          <Text variant="bodySm" tone="subdued" as="p">
-                            {src.description}
-                          </Text>
-                        </BlockStack>
-                        <InlineStack gap="200" blockAlign="center">
-                          {!connected && (
-                            <Button size="slim" variant="plain" url={src.docsUrl} external>
-                              Setup guide
-                            </Button>
-                          )}
-                          <Badge tone={connected ? "success" : "warning"}>
-                            {connected ? "✓ Connected" : "Needs setup"}
-                          </Badge>
-                        </InlineStack>
-                      </InlineStack>
-                    </Box>
-                  </Box>
-                );
-              })}
-            </BlockStack>
-          </BlockStack>
         </Card>
 
         {/* ── Alerts & Notifications ──────────────────────────────────────────── */}
@@ -416,30 +326,45 @@ export default function SettingsPage() {
               id="developer-settings"
               transition={{ duration: "200ms", timingFunction: "ease-in-out" }}
             >
-              <BlockStack gap="300">
+              <BlockStack gap="400">
                 <Banner tone="info">
                   <p>
-                    API credentials are set as environment variables on the server and are never
-                    stored in the database. Update them via your hosting platform (Fly.io, Railway,
-                    etc.) and redeploy to apply changes.
+                    All API credentials are your developer keys — merchants never need to supply
+                    their own. Set them as environment variables on your hosting platform (Fly.io,
+                    Railway, etc.) and redeploy to apply changes. They are never stored in the
+                    database.
                   </p>
                 </Banner>
+
+                <Text variant="bodyMd" fontWeight="semibold" as="p">Price data sources</Text>
                 <BlockStack gap="200">
-                  {ADVANCED_ENV_VARS.map(({ key, label }) => (
-                    <Box
-                      key={key}
-                      padding="200"
-                      background="bg-surface-secondary"
-                      borderRadius="100"
-                    >
+                  {ADVANCED_ENV_VARS.filter(v =>
+                    ["EBAY_CLIENT_ID","EBAY_CLIENT_SECRET","TCGPLAYER_PUBLIC_KEY","TCGPLAYER_PRIVATE_KEY","PRICECHARTING_API_KEY"].includes(v.key)
+                  ).map(({ key, label }) => (
+                    <Box key={key} padding="200" background="bg-surface-secondary" borderRadius="100">
                       <InlineStack align="space-between">
                         <BlockStack gap="050">
-                          <Text as="span" variant="bodyMd" fontWeight="semibold">
-                            {label}
-                          </Text>
-                          <Text as="span" variant="bodySm" tone="subdued">
-                            {key}
-                          </Text>
+                          <Text as="span" variant="bodyMd" fontWeight="semibold">{label}</Text>
+                          <Text as="span" variant="bodySm" tone="subdued">{key}</Text>
+                        </BlockStack>
+                        <Badge tone={advancedEnvStatus[key] ? "success" : "critical"}>
+                          {advancedEnvStatus[key] ? "Set" : "Not set"}
+                        </Badge>
+                      </InlineStack>
+                    </Box>
+                  ))}
+                </BlockStack>
+
+                <Text variant="bodyMd" fontWeight="semibold" as="p">Other services</Text>
+                <BlockStack gap="200">
+                  {ADVANCED_ENV_VARS.filter(v =>
+                    ["RESEND_API_KEY","USD_TO_GBP_RATE"].includes(v.key)
+                  ).map(({ key, label }) => (
+                    <Box key={key} padding="200" background="bg-surface-secondary" borderRadius="100">
+                      <InlineStack align="space-between">
+                        <BlockStack gap="050">
+                          <Text as="span" variant="bodyMd" fontWeight="semibold">{label}</Text>
+                          <Text as="span" variant="bodySm" tone="subdued">{key}</Text>
                         </BlockStack>
                         <Badge tone={advancedEnvStatus[key] ? "success" : "critical"}>
                           {advancedEnvStatus[key] ? "Set" : "Not set"}

@@ -115,11 +115,11 @@ export default function Dashboard() {
   // ── Onboarding steps ────────────────────────────────────────────────────────
   const setupSteps = [
     {
-      label: "Connect a price data source",
-      detail: "eBay, TCGPlayer, or PriceCharting",
+      label: "Price data source active",
+      detail: "eBay, TCGPlayer, or PriceCharting (configured by your app provider)",
       complete: integrationStatus.hasDataSource,
-      action: "Go to Settings",
-      url: "/app/settings",
+      action: null,
+      url: null,
     },
     {
       label: "Link your first product",
@@ -249,8 +249,8 @@ export default function Dashboard() {
                           </Text>
                         </BlockStack>
                       </InlineStack>
-                      {!step.complete && (
-                        <Button size="slim" url={step.url}>
+                      {!step.complete && step.action && (
+                        <Button size="slim" url={step.url ?? undefined}>
                           {step.action}
                         </Button>
                       )}
