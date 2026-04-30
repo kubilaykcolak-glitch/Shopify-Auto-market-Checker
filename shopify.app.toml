@@ -26,11 +26,3 @@ api_version = "2024-01"
 
 [pos]
 embedded = false
-
-# Web server config — required so the CLI proxy creates a default route
-# and forwards all requests (including /app) to the local Remix server.
-[[web]]
-roles = ["frontend"]
-
-[web.commands]
-dev = "npm run dev:vite"
