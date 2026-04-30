@@ -23,7 +23,7 @@ import {
 import { useState } from "react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { EBAY_POKEMON_CATEGORIES } from "../lib/ebay.server";
+import { EBAY_POKEMON_CATEGORIES } from "../lib/ebay-categories";
 
 // ── Loader ────────────────────────────────────────────────────────────────────
 
