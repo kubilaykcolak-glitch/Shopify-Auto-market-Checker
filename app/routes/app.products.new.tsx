@@ -32,9 +32,10 @@ import { useState } from "react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { searchTCGPlayerProduct } from "../lib/tcgplayer.server";
-import { previewEbaySoldListings, EBAY_POKEMON_CATEGORIES } from "../lib/ebay.server";
+import { previewEbaySoldListings } from "../lib/ebay.server";
 import { searchPriceChartingProducts } from "../lib/pricecharting.server";
 import type { EbaySoldListing } from "../lib/ebay.server";
+import { EBAY_POKEMON_CATEGORIES } from "../lib/ebay-categories";
 
 // ── Loader: fetch Shopify products ──────────────────────────────────────────
 

@@ -13,22 +13,12 @@
  */
 
 import { fetchWithRetry, FetchError } from "./fetch-utils.server";
+export { EBAY_POKEMON_CATEGORIES, type EbayCategoryId } from "./ebay-categories";
 
 const EBAY_TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token";
 const EBAY_BROWSE_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search";
 // Scope required for Browse API read-only access
 const EBAY_SCOPE = "https://api.ebay.com/oauth/api_scope/buy.item.summary";
-
-// eBay category IDs for Pokemon TCG items
-export const EBAY_POKEMON_CATEGORIES = [
-  { label: "Individual Cards", value: "183454" },
-  { label: "Graded Cards (PSA / BGS / CGC)", value: "261328" },
-  { label: "Sealed Booster Packs", value: "183456" },
-  { label: "Sealed Boxes & Sets", value: "183455" },
-  { label: "Lots & Collections", value: "197" },
-] as const;
-
-export type EbayCategoryId = (typeof EBAY_POKEMON_CATEGORIES)[number]["value"];
 
 interface TokenCache {
   token: string;
