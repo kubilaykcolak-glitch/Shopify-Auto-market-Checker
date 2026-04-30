@@ -1,6 +1,6 @@
 name = "pokeprice-sync"
-client_id = "{{ SHOPIFY_API_KEY }}"
-application_url = "{{ APP_URL }}"
+client_id = "427258d58be485eaa2a43a6be570f1d9"
+application_url = "https://pokeprice-sync.fly.dev"
 embedded = true
 
 [access_scopes]
@@ -8,9 +8,9 @@ scopes = "read_products,write_products,read_inventory,write_inventory"
 
 [auth]
 redirect_urls = [
-  "{{ APP_URL }}/auth/callback",
-  "{{ APP_URL }}/auth/shopify/callback",
-  "{{ APP_URL }}/exitiframe"
+  "https://pokeprice-sync.fly.dev/auth/callback",
+  "https://pokeprice-sync.fly.dev/auth/shopify/callback",
+  "https://pokeprice-sync.fly.dev/exitiframe"
 ]
 
 [webhooks]
