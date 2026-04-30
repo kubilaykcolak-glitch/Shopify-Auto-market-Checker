@@ -72,14 +72,14 @@ export async function action({ request }: ActionFunctionArgs) {
   await prisma.storeSettings.upsert({
     where: { storeId: store.id },
     update: {
-      pollIntervalMinutes: parseInt(formData.get("pollIntervalMinutes") as string) || 30,
+      pollIntervalMinutes: parseInt(formData.get("pollIntervalMinutes") as string) || 1440,
       emailAlerts: formData.get("emailAlerts") === "true",
       alertEmail: (formData.get("alertEmail") as string) || null,
       slackWebhookUrl: (formData.get("slackWebhookUrl") as string) || null,
     },
     create: {
       storeId: store.id,
-      pollIntervalMinutes: parseInt(formData.get("pollIntervalMinutes") as string) || 30,
+      pollIntervalMinutes: parseInt(formData.get("pollIntervalMinutes") as string) || 1440,
       emailAlerts: formData.get("emailAlerts") === "true",
       alertEmail: (formData.get("alertEmail") as string) || null,
       slackWebhookUrl: (formData.get("slackWebhookUrl") as string) || null,
@@ -92,12 +92,9 @@ export async function action({ request }: ActionFunctionArgs) {
 // ── Static data ───────────────────────────────────────────────────────────────
 
 const intervalOptions = [
-  { label: "Every 15 minutes", value: "15" },
-  { label: "Every 30 minutes (recommended)", value: "30" },
-  { label: "Every hour", value: "60" },
-  { label: "Every 2 hours", value: "120" },
   { label: "Every 6 hours", value: "360" },
-  { label: "Once a day", value: "1440" },
+  { label: "Every 12 hours", value: "720" },
+  { label: "Once a day (recommended)", value: "1440" },
 ];
 
 const ADVANCED_ENV_VARS = [
@@ -120,7 +117,7 @@ export default function SettingsPage() {
   const isSaving = navigation.state === "submitting";
 
   const [pollInterval, setPollInterval] = useState(
-    String(settings?.pollIntervalMinutes ?? "30")
+    String(settings?.pollIntervalMinutes ?? "1440")
   );
   const [emailAlerts, setEmailAlerts] = useState(settings?.emailAlerts ?? false);
   const [alertEmail, setAlertEmail] = useState(settings?.alertEmail ?? "");
