@@ -102,7 +102,7 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 export default function Dashboard() {
-  const { storeId, shop, products, recentLogs, stats, enabledRulesCount, integrationStatus } =
+  const { storeId, shop, products, recentLogs, stats, enabledRulesCount } =
     useLoaderData<typeof loader>();
   const submit = useSubmit();
   const navigation = useNavigation();
@@ -114,13 +114,6 @@ export default function Dashboard() {
 
   // ── Onboarding steps ────────────────────────────────────────────────────────
   const setupSteps = [
-    {
-      label: "Price data source active",
-      detail: "eBay, TCGPlayer, or PriceCharting (configured by your app provider)",
-      complete: integrationStatus.hasDataSource,
-      action: null,
-      url: null,
-    },
     {
       label: "Link your first product",
       detail: "Connect a Shopify product to live pricing data",
