@@ -17,8 +17,8 @@ export { EBAY_POKEMON_CATEGORIES, type EbayCategoryId } from "./ebay-categories"
 
 const EBAY_TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token";
 const EBAY_BROWSE_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search";
-// Scope required for Browse API read-only access
-const EBAY_SCOPE = "https://api.ebay.com/oauth/api_scope/buy.item.summary";
+// Scope required for Browse API public (client credentials) access
+const EBAY_SCOPE = "https://api.ebay.com/oauth/api_scope";
 
 interface TokenCache {
   token: string;
@@ -62,7 +62,8 @@ async function getEbayAppToken(): Promise<string> {
   const data = await response.json();
 
   if (!data.access_token) {
-    throw new Error(`eBay token response missing access_token: ${JSON.stringify(data)}`);
+    const reason = data.error_description ?? data.error ?? JSON.stringify(data);
+    throw new Error(`eBay OAuth failed: ${reason}`);
   }
 
   tokenCache = {
