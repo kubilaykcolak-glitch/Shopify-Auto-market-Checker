@@ -20,10 +20,14 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ error: "Store not found" }, { status: 404 });
   }
 
-  // Fire and forget — return immediately so the UI isn't blocked
-  runSyncForStore(store.id).catch((error: unknown) => {
+  // Await completion so callers receive the response only after all products
+  // have been checked and logs written — makes the UI reflect real results.
+  try {
+    await runSyncForStore(store.id);
+  } catch (error: unknown) {
     console.error(`[API/sync] Sync failed for ${session.shop}:`, error);
-  });
+    return json({ error: "Sync failed" }, { status: 500 });
+  }
 
-  return json({ success: true, message: "Sync started" });
+  return json({ success: true, message: "Sync complete" });
 }

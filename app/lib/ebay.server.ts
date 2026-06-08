@@ -1,66 +1,78 @@
 /**
- * eBay Price Service â€” Browse API
+ * eBay Price Service — Browse API
  *
- * Uses the eBay Browse API (/buy/browse/v1/item_summary/search) with sold
- * listing filtering to get real market prices. Replaces the legacy Finding API.
+ * Fetches sold listing prices via the eBay Browse API with a sold-first
+ * search strategy:
  *
- * Credentials required (both found on the same page):
- *   https://developer.ebay.com/ â†’ My Account â†’ Application Keys â†’ Production
+ *   Phase 1 — Sold listings (filter=soldItemsOnly:true)
+ *     Prices reflect actual transaction values — what buyers paid.
+ *     Works on EBAY_GB and EBAY_US for queries that have real sold results.
+ *     When eBay has no sold data for a query it returns errorId 12002 in the
+ *     warnings array (not an HTTP error); the code treats this as zero results
+ *     and moves to the next step.
+ *
+ *   Phase 2 — Active listings fallback
+ *     Used only when every sold attempt returns zero results.
+ *     UI surfaces a warning banner when this path is taken.
+ *
+ * NOTE — Finding API (findCompletedItems) and Marketplace Insights API:
+ *   Both are blocked for this developer account (HTTP 500 / 403 respectively).
+ *   Do not re-add them; they only add retry delays without returning data.
+ *
+ * Filter encoding note:
+ *   The soldItemsOnly filter MUST be appended to the URL as a raw string, NOT
+ *   via URLSearchParams. URLSearchParams encodes ':' → '%3A' and eBay's filter
+ *   parser silently ignores the param when it receives the encoded form,
+ *   returning active listings as if no filter was set.
+ *
+ * Credentials required:
+ *   https://developer.ebay.com → Application Keys → Production
  *   EBAY_CLIENT_ID     = "App ID (Client ID)"
  *   EBAY_CLIENT_SECRET = "Cert ID (Client Secret)"
- *
- * If you previously had EBAY_APP_ID, that value is your EBAY_CLIENT_ID.
  */
 
 import { fetchWithRetry, FetchError } from "./fetch-utils.server";
 export { EBAY_POKEMON_CATEGORIES, type EbayCategoryId } from "./ebay-categories";
 
-const EBAY_TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token";
+const EBAY_TOKEN_URL  = "https://api.ebay.com/identity/v1/oauth2/token";
 const EBAY_BROWSE_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search";
-// Scope required for Browse API public (client credentials) access
-const EBAY_SCOPE = "https://api.ebay.com/oauth/api_scope";
+const EBAY_SCOPE      = "https://api.ebay.com/oauth/api_scope";
+
+// ── OAuth App Token ───────────────────────────────────────────────────────────
 
 interface TokenCache {
   token: string;
-  expiresAt: number; // Unix ms
+  expiresAt: number;
 }
 
 let tokenCache: TokenCache | null = null;
 
-// â”€â”€ OAuth App Token â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 async function getEbayAppToken(): Promise<string> {
-  // Return cached token with 60s buffer before expiry
   if (tokenCache && Date.now() < tokenCache.expiresAt - 60_000) {
     return tokenCache.token;
   }
 
-  const clientId = process.env.EBAY_CLIENT_ID;
+  const clientId     = process.env.EBAY_CLIENT_ID;
   const clientSecret = process.env.EBAY_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
     throw new Error(
       "eBay credentials not configured. Set EBAY_CLIENT_ID and EBAY_CLIENT_SECRET. " +
-        "Find them at https://developer.ebay.com â†’ Application Keys â†’ Production."
+        "Find them at https://developer.ebay.com → Application Keys → Production."
     );
   }
 
   const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-
   const response = await fetchWithRetry(EBAY_TOKEN_URL, {
     method: "POST",
     headers: {
       Authorization: `Basic ${credentials}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
-      scope: EBAY_SCOPE,
-    }),
+    body: new URLSearchParams({ grant_type: "client_credentials", scope: EBAY_SCOPE }),
   });
 
   const data = await response.json();
-
   if (!data.access_token) {
     const reason = data.error_description ?? data.error ?? JSON.stringify(data);
     throw new Error(`eBay OAuth failed: ${reason}`);
@@ -70,80 +82,313 @@ async function getEbayAppToken(): Promise<string> {
     token: data.access_token,
     expiresAt: Date.now() + (data.expires_in ?? 7200) * 1000,
   };
-
-  console.log("[eBay] OAuth app token obtained, expires in", data.expires_in, "seconds");
+  console.log("[eBay] OAuth token obtained, expires in", data.expires_in, "seconds");
   return tokenCache.token;
 }
 
-// â”€â”€ Shared response type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Shared response types ─────────────────────────────────────────────────────
 
 export interface EbaySoldListing {
   title: string;
   price: number;
   currency: string;
-  soldDate: string;  // ISO string
+  /** Sale date (soldItemsOnly results) or listing creation date (active fallback) */
+  soldDate: string;
   condition: string;
   itemUrl: string;
 }
 
-// â”€â”€ Browse API call â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+export interface EbayPreviewResult {
+  listings: EbaySoldListing[];
+  effectiveQuery: string;
+  /**
+   * True = prices are from real sold/completed transactions.
+   * False = no sold data found; prices are from active listings (approximation).
+   */
+  usedSoldData: boolean;
+}
 
-async function searchSoldListings(
+// ── Browse API call ───────────────────────────────────────────────────────────
+
+/** Convert a price to GBP. */
+function toGBP(value: number, currency: string): number {
+  if (currency === "GBP") return value;
+  if (currency === "USD") {
+    const rate = parseFloat(process.env.USD_TO_GBP_RATE ?? "0.79");
+    return value * rate;
+  }
+  return value;
+}
+
+/** Normalise USD items to GBP in-place (for EBAY_US results). */
+function normaliseToGBP(items: any[]): any[] {
+  return items.map((item: any) => {
+    const currency: string = item.price?.currency ?? "USD";
+    const raw: number = parseFloat(item.price?.value ?? "0");
+    if (currency !== "GBP") {
+      return {
+        ...item,
+        price: { value: String(toGBP(raw, currency).toFixed(2)), currency: "GBP" },
+      };
+    }
+    return item;
+  });
+}
+
+/**
+ * Single Browse API call.
+ *
+ * soldOnly=true appends &filter=soldItemsOnly:true to the URL as a raw string.
+ * This MUST NOT go through URLSearchParams — see file header for why.
+ *
+ * No sort param — eBay's default "Best Match" ranks by relevance. "sort:price"
+ * returns cheapest items first (stickers, proxies) which pollutes price averages.
+ */
+async function browseSearch(
+  token: string,
   query: string,
-  categoryId: string,
-  limit: number
+  limit: number,
+  categoryId?: string,
+  marketplace: "EBAY_GB" | "EBAY_US" = "EBAY_GB",
+  soldOnly = false
 ): Promise<any[]> {
-  const token = await getEbayAppToken();
+  // Replace slashes with spaces: "199/197" → "199 197"
+  // URLSearchParams encodes "/" as "%2F" which eBay treats as a literal string.
+  const normQ = query.replace(/\//g, " ").replace(/\s{2,}/g, " ").trim();
 
   const params = new URLSearchParams({
-    q: query,
-    category_ids: categoryId,
-    // Filter: fixed price, sold only, GBP currency, items located in GB
-    filter: "buyingOptions:{FIXED_PRICE},soldItemsOnly:true,currency:GBP,itemLocationCountry:GB",
-    sort: "newlyListed",
-    limit: String(limit),
-    fieldgroups: "MATCHING_ITEMS",
+    q: normQ,
+    limit: String(Math.min(limit, 200)),
   });
+  if (categoryId) params.set("category_ids", categoryId);
 
-  const response = await fetchWithRetry(`${EBAY_BROWSE_URL}?${params}`, {
+  // Append filter with literal colon — URLSearchParams would encode ':' → '%3A'
+  // which eBay silently ignores, returning active listings instead.
+  let url = `${EBAY_BROWSE_URL}?${params.toString()}`;
+  if (soldOnly) url += "&filter=soldItemsOnly:true";
+
+  const response = await fetchWithRetry(url, {
     headers: {
       Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB",
+      "X-EBAY-C-MARKETPLACE-ID": marketplace,
     },
   });
 
   const data = await response.json();
-  return data.itemSummaries ?? [];
+
+  // Hard errors inside a 200 response
+  if (data.errors?.length) {
+    const msg: string = data.errors[0]?.message ?? JSON.stringify(data.errors[0]);
+    console.error(`[eBay] browseSearch (${marketplace}, sold=${soldOnly}): API error: ${msg}`);
+    throw new FetchError(200, `eBay error: ${msg}`);
+  }
+
+  const items: any[] = data.itemSummaries ?? [];
+
+  if (items.length === 0) {
+    // Warnings (e.g. errorId 12002 "soldItemsOnly filter value is invalid") appear
+    // when the filter yields no results for this query/marketplace combination.
+    // Treat as zero results — the fallback chain will try the next step.
+    const warnSummary = data.warnings?.length
+      ? ` warning=${data.warnings[0]?.errorId ?? "?"}:"${data.warnings[0]?.message?.slice(0, 80) ?? ""}"`
+      : "";
+    console.log(
+      `[eBay] (${marketplace}, sold=${soldOnly}, cat=${categoryId ?? "none"}): 0 results for "${normQ}"${warnSummary}`
+    );
+  } else {
+    console.log(
+      `[eBay] (${marketplace}, sold=${soldOnly}, cat=${categoryId ?? "none"}): ${items.length} results for "${normQ}"`
+    );
+  }
+
+  return items;
 }
 
-function mapToSoldListing(item: any): EbaySoldListing {
+// ── Query simplification ──────────────────────────────────────────────────────
+
+/**
+ * Generate progressively simpler fallback queries.
+ * "charizard obsidian flames 199/197 PSA 10"
+ *   → "charizard obsidian flames PSA 10"   (no card number)
+ *   → "charizard obsidian flames 199/197"  (no grade)
+ *   → "charizard obsidian flames"           (neither)
+ */
+function simplifyQuery(query: string): string[] {
+  const variants: string[] = [];
+  const seen = new Set<string>([query]);
+
+  const cardNumberPattern = /\b\d{1,3}[/ ]\d{1,3}\b/g;
+  const gradePattern = /\b(psa|bgs|cgc|sgc|ace)\s*\d*\b/gi;
+  const clean = (s: string) => s.replace(/\s{2,}/g, " ").trim();
+
+  for (const v of [
+    clean(query.replace(cardNumberPattern, " ")),
+    clean(query.replace(gradePattern, " ")),
+    clean(query.replace(cardNumberPattern, " ").replace(gradePattern, " ")),
+  ]) {
+    if (v && !seen.has(v)) { seen.add(v); variants.push(v); }
+  }
+  return variants;
+}
+
+// ── Core search with sold-first strategy ─────────────────────────────────────
+
+interface SearchResult {
+  items: any[];
+  effectiveQuery: string;
+  usedSoldData: boolean;
+  source: string;
+}
+
+/**
+ * Run the market+category fallback chain for one soldOnly mode.
+ *
+ *   Step 1: EBAY_GB + category
+ *   Step 2: EBAY_GB, no category
+ *   Step 3: EBAY_US, no category (prices converted to GBP)
+ *
+ * Returns null if all steps produce zero results.
+ */
+async function searchMarkets(
+  token: string,
+  query: string,
+  categoryId: string,
+  limit: number,
+  soldOnly: boolean
+): Promise<{ items: any[]; marketplace: string } | null> {
+  // Step 1: UK + category
+  const gb1 = await browseSearch(token, query, limit, categoryId, "EBAY_GB", soldOnly);
+  if (gb1.length > 0) return { items: gb1, marketplace: "EBAY_GB" };
+
+  // Step 2: UK, no category
+  const gb2 = await browseSearch(token, query, limit, undefined, "EBAY_GB", soldOnly);
+  if (gb2.length > 0) return { items: gb2, marketplace: "EBAY_GB" };
+
+  // Step 3: US, no category — convert USD → GBP
+  const us = await browseSearch(token, query, limit, undefined, "EBAY_US", soldOnly);
+  if (us.length > 0) return { items: normaliseToGBP(us), marketplace: "EBAY_US" };
+
+  return null;
+}
+
+/** Sentinel thrown when the OAuth token is confirmed invalid (HTTP 401). */
+class TokenInvalidError extends Error {
+  constructor() { super("eBay OAuth token invalid (401)"); this.name = "TokenInvalidError"; }
+}
+
+/**
+ * Full search with sold-first strategy and progressive query simplification.
+ *
+ *   Phase 1 — Sold listings
+ *     Tries the full query then simplified variants across all markets.
+ *
+ *   Phase 2 — Active listings (fallback)
+ *     Only runs if Phase 1 returns nothing everywhere.
+ *     Caller receives usedSoldData:false so the UI can warn the user.
+ */
+async function searchListings(
+  query: string,
+  categoryId: string,
+  limit: number
+): Promise<SearchResult> {
+  const token = await getEbayAppToken();
+  const queriesToTry = [query, ...simplifyQuery(query)];
+
+  /**
+   * Wraps searchMarkets and converts a 401 FetchError into a TokenInvalidError
+   * so the outer loops can abort immediately — no point continuing with a token
+   * eBay has already rejected.
+   */
+  async function tryMarkets(
+    q: string,
+    soldOnly: boolean
+  ): Promise<{ items: any[]; marketplace: string } | null> {
+    try {
+      return await searchMarkets(token, q, categoryId, limit, soldOnly);
+    } catch (err) {
+      if (err instanceof FetchError && err.status === 401) {
+        // Clear the cache so the next top-level search gets a fresh token
+        tokenCache = null;
+        throw new TokenInvalidError();
+      }
+      // Any other error (5xx exhausted, network failure): log and treat as zero results
+      console.warn(`[eBay] Search error for "${q}" (sold=${soldOnly}):`, err instanceof Error ? err.message : err);
+      return null;
+    }
+  }
+
+  // ── Phase 1: Sold listings ─────────────────────────────────────────────────
+  for (const q of queriesToTry) {
+    try {
+      const result = await tryMarkets(q, true);
+      if (result) {
+        if (q !== query) console.log(`[eBay] Sold: simplified query "${q}" matched on ${result.marketplace}`);
+        return { items: result.items, effectiveQuery: q, usedSoldData: true, source: `sold-${result.marketplace}` };
+      }
+    } catch (err) {
+      if (err instanceof TokenInvalidError) {
+        console.error("[eBay] Token invalid (401) — aborting search, cache cleared for next request");
+        return { items: [], effectiveQuery: query, usedSoldData: false, source: "none" };
+      }
+    }
+  }
+
+  console.log(`[eBay] No sold listings found for "${query}" — falling back to active listings`);
+
+  // ── Phase 2: Active listings ───────────────────────────────────────────────
+  for (const q of queriesToTry) {
+    try {
+      const result = await tryMarkets(q, false);
+      if (result) {
+        if (q !== query) console.log(`[eBay] Active: simplified query "${q}" matched on ${result.marketplace}`);
+        return { items: result.items, effectiveQuery: q, usedSoldData: false, source: `active-${result.marketplace}` };
+      }
+    } catch (err) {
+      if (err instanceof TokenInvalidError) {
+        console.error("[eBay] Token invalid (401) — aborting search, cache cleared for next request");
+        return { items: [], effectiveQuery: query, usedSoldData: false, source: "none" };
+      }
+    }
+  }
+
+  return { items: [], effectiveQuery: query, usedSoldData: false, source: "none" };
+}
+
+/** Map a Browse API item to the shared listing shape. */
+function mapItem(item: any, soldData: boolean): EbaySoldListing {
+  const soldDate = soldData
+    ? (item.lastSoldDate ?? item.itemEndDate ?? item.itemCreationDate ?? "")
+    : (item.itemCreationDate ?? "");
+
   return {
     title: item.title ?? "Unknown",
     price: parseFloat(item.price?.value ?? "0"),
     currency: item.price?.currency ?? "GBP",
-    // Browse API returns itemEndDate for sold items
-    soldDate: item.itemEndDate ?? item.itemCreationDate ?? "",
+    soldDate,
     condition: item.condition ?? "Not specified",
     itemUrl: item.itemWebUrl ?? "",
   };
 }
 
-// â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Preview top N sold listings for the product linking confirmation step.
- * Returns enough detail for a merchant to verify the search is returning
- * sensible results before saving.
+ * Preview top N listings for the product-linking confirmation step.
+ * Sold listings are shown where available; falls back to active with a warning.
  */
 export async function previewEbaySoldListings(
   query: string,
   categoryId: string,
   limit = 5
-): Promise<EbaySoldListing[]> {
+): Promise<EbayPreviewResult> {
   try {
-    const items = await searchSoldListings(query, categoryId, limit);
-    return items.map(mapToSoldListing);
+    const { items, effectiveQuery, usedSoldData, source } = await searchListings(query, categoryId, limit);
+    console.log(`[eBay] preview: source=${source} usedSold=${usedSoldData} count=${items.length} query="${effectiveQuery}"`);
+    return {
+      listings: items.slice(0, limit).map((i) => mapItem(i, usedSoldData)),
+      effectiveQuery,
+      usedSoldData,
+    };
   } catch (error) {
     if (error instanceof FetchError) {
       throw new Error(`eBay search failed (HTTP ${error.status}): ${error.message}`);
@@ -153,76 +398,61 @@ export async function previewEbaySoldListings(
 }
 
 /**
- * Get the trimmed median market price for a tracked product.
- * Called on every scheduled sync.
- *
- * Returns null if:
- * - No results found
- * - eBay credentials not set
- * - API returns an error after retries
+ * Get the trimmed average market price for a scheduled sync.
+ * Uses sold data where available; active listings as approximation fallback.
  */
 export async function getEbayMarketPrice(
   query: string,
   categoryId: string,
-  daysBack = 30
+  daysBack = 30 // kept for API compatibility — not used with Browse API
 ): Promise<number | null> {
   try {
-    const items = await searchSoldListings(query, categoryId, 50);
+    const { items, effectiveQuery, usedSoldData, source } = await searchListings(query, categoryId, 50);
 
     if (items.length === 0) {
-      console.warn(`[eBay] No results for query: "${query}" in category ${categoryId}`);
+      console.warn(`[eBay] No listings found for "${query}" in category ${categoryId}`);
       return null;
     }
 
-    // Prefer items sold within the last N days; fall back to all items if < 3 recent
-    const cutoff = Date.now() - daysBack * 24 * 60 * 60 * 1000;
-    const recent = items.filter((item: any) => {
-      if (!item.itemEndDate) return false;
-      return new Date(item.itemEndDate).getTime() >= cutoff;
-    });
+    // For active listing fallback: prefer fixed-price over auctions for cleaner signals
+    let priceItems = items;
+    if (!usedSoldData) {
+      const fixed = items.filter((i: any) =>
+        Array.isArray(i.buyingOptions) && i.buyingOptions.includes("FIXED_PRICE")
+      );
+      if (fixed.length >= 3) priceItems = fixed;
+    }
 
-    const source = recent.length >= 3 ? recent : items;
-
-    const prices = source
-      .map((item: any) => parseFloat(item.price?.value ?? "0"))
+    const prices = priceItems
+      .map((i: any) => parseFloat(i.price?.value ?? "0"))
       .filter((p: number) => !isNaN(p) && p > 0);
 
     if (prices.length === 0) return null;
 
-    // Remove top and bottom 10% outliers, then return median
     prices.sort((a: number, b: number) => a - b);
     const trimCount = Math.floor(prices.length * 0.1);
     const endIndex = trimCount > 0 ? prices.length - trimCount : prices.length;
     const trimmed = prices.slice(trimCount, endIndex);
-
     const working = trimmed.length > 0 ? trimmed : prices;
-    const mid = Math.floor(working.length / 2);
-    const median =
-      working.length % 2 === 0
-        ? (working[mid - 1] + working[mid]) / 2
-        : working[mid];
+    const average = working.reduce((sum: number, p: number) => sum + p, 0) / working.length;
 
+    const querySuffix = effectiveQuery !== query ? ` (simplified from "${query}")` : "";
     console.log(
-      `[eBay] "${query}" â€” ${source.length} listings, trimmed to ${working.length}, median: Â£${median.toFixed(2)}`
+      `[eBay] "${effectiveQuery}"${querySuffix} — source=${source} usedSold=${usedSoldData}, ${working.length} prices, avg: £${average.toFixed(2)}`
     );
-    return median;
+    return average;
   } catch (error) {
-    if (error instanceof FetchError && error.status === 401) {
-      // Token may have expired mid-request â€” clear cache so next call re-authenticates
-      tokenCache = null;
-    }
     console.error(`[eBay] getEbayMarketPrice failed for "${query}":`, error);
     return null;
   }
 }
 
 /**
- * Legacy compatibility shim â€” kept so any existing callers don't break.
- * New code should use previewEbaySoldListings directly.
+ * Legacy compatibility shim.
  */
 export async function searchEbayProducts(
   query: string
 ): Promise<{ id: string; title: string }[]> {
-  const listings = await previewEbaySoldListings(query, "183454", 5);
+  const { listings } = await previewEbaySoldListings(query, "183454", 5);
   return listings.map((l, i) => ({ id: String(i), title: l.title }));
 }

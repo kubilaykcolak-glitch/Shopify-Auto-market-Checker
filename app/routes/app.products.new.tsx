@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   json,
   type LoaderFunctionArgs,
@@ -77,14 +77,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
     select: { id: true },
   });
 
-  return json({ shopifyProducts, storeId: store?.id });
+  const trackedProducts = store
+    ? await prisma.trackedProduct.findMany({
+        where: { storeId: store.id },
+        select: {
+          shopifyVariantId: true,
+          priceSource: true,
+          cardCondition: true,
+          ebaySearchQuery: true,
+          ebayCategoryId: true,
+          externalId: true,
+          externalName: true,
+        },
+      })
+    : [];
+
+  return json({ shopifyProducts, storeId: store?.id, trackedProducts });
 }
 
 // ── Action ───────────────────────────────────────────────────────────────────
 
 type ActionResult =
   | { intent: "search_results"; results: { id: string; name: string; extra?: string }[]; error: string | null }
-  | { intent: "ebay_preview"; listings: EbaySoldListing[]; error: string | null }
+  | { intent: "ebay_preview"; listings: EbaySoldListing[]; effectiveQuery: string; generation: number; usedSoldData: boolean; error: string | null }
   | { intent: "link_success"; count: number; error: null }
   | { error: string };
 
@@ -117,11 +132,12 @@ export async function action({ request }: ActionFunctionArgs): Promise<Response>
   if (intent === "preview_ebay") {
     const query = formData.get("query") as string;
     const categoryId = formData.get("categoryId") as string;
+    const generation = parseInt(formData.get("generation") as string, 10) || 0;
     try {
-      const listings = await previewEbaySoldListings(query, categoryId, 5);
-      return json<ActionResult>({ intent: "ebay_preview", listings, error: null });
+      const { listings, effectiveQuery, usedSoldData } = await previewEbaySoldListings(query, categoryId, 5);
+      return json<ActionResult>({ intent: "ebay_preview", listings, effectiveQuery, usedSoldData, generation, error: null });
     } catch (error: any) {
-      return json<ActionResult>({ intent: "ebay_preview", listings: [], error: error.message });
+      return json<ActionResult>({ intent: "ebay_preview", listings: [], effectiveQuery: query, usedSoldData: false, generation, error: error.message });
     }
   }
 
@@ -261,7 +277,7 @@ const ebayCategoryOptions = EBAY_POKEMON_CATEGORIES.map((c) => ({
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function NewProduct() {
-  const { shopifyProducts } = useLoaderData<typeof loader>();
+  const { shopifyProducts, trackedProducts } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
   const navigation = useNavigation();
@@ -277,6 +293,26 @@ export default function NewProduct() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedExternal, setSelectedExternal] = useState<{ id: string; name: string; extra?: string } | null>(null);
   const [ebayConfirmed, setEbayConfirmed] = useState(false);
+
+  // ── Preview generation counter ───────────────────────────────────────────
+  // Incremented whenever the product selection changes so that stale
+  // actionData from a previous product's eBay preview is never displayed.
+  const [previewGeneration, setPreviewGeneration] = useState(0);
+
+  // ── Per-product draft state ──────────────────────────────────────────────
+  // Persists each product's in-progress config as the user switches between
+  // products, so returning to a product restores exactly what they typed.
+  // Stored in a ref (not state) so saves don't trigger re-renders.
+  type ProductDraft = {
+    priceSource: string;
+    cardCondition: string;
+    ebayCategory: string;
+    searchQuery: string;
+    ebayConfirmed: boolean;
+    selectedExternal: { id: string; name: string; extra?: string } | null;
+  };
+  const perProductDraft = React.useRef<Map<string, ProductDraft>>(new Map());
+  const prevProductId = React.useRef<string | null>(null);
 
   // ── Cost price ───────────────────────────────────────────────────────────
   const [costPriceShared, setCostPriceShared] = useState("");
@@ -295,6 +331,22 @@ export default function NewProduct() {
     [shopifyProducts, selectedIds]
   );
 
+  // Map shopifyVariantId → tracked config for quick lookups
+  const trackedByVariantId = useMemo(
+    () => new Map(trackedProducts.map((t) => [t.shopifyVariantId, t])),
+    [trackedProducts]
+  );
+
+  // Which of the currently-selected products already have a tracked price source?
+  const selectedWithExistingConfig = useMemo(
+    () =>
+      selectedProducts.filter((p: any) => {
+        const variantId = p.variants.edges[0]?.node?.id;
+        return variantId && trackedByVariantId.has(variantId);
+      }),
+    [selectedProducts, trackedByVariantId]
+  );
+
   const isSingleSelect = selectedIds.length === 1;
   const isMultiSelect = selectedIds.length > 1;
   const singleProduct = isSingleSelect ? selectedProducts[0] : null;
@@ -302,6 +354,69 @@ export default function NewProduct() {
   const shopifyCostForSingle = singleVariant?.inventoryItem?.unitCost?.amount
     ? parseFloat(singleVariant.inventoryItem.unitCost.amount)
     : null;
+
+  // ── Pre-fill / reset config when selection changes ───────────────────────
+  useEffect(() => {
+    // 1. Save the outgoing product's in-progress config so we can restore it
+    //    if the user comes back to it before saving.
+    //    (Effect closure captures state from the render that triggered it —
+    //    i.e. the state still reflects the PREVIOUS product at this point.)
+    if (prevProductId.current) {
+      perProductDraft.current.set(prevProductId.current, {
+        priceSource, cardCondition, ebayCategory, searchQuery, ebayConfirmed, selectedExternal,
+      });
+    }
+
+    // 2. Bump generation — stale ebay_preview actionData becomes invisible.
+    setPreviewGeneration((g) => g + 1);
+
+    const newProductId = isSingleSelect && singleProduct ? singleProduct.id : null;
+    prevProductId.current = newProductId;
+
+    if (isSingleSelect && singleProduct) {
+      const variantId = singleProduct.variants.edges[0]?.node?.id;
+      const tracked = variantId ? trackedByVariantId.get(variantId) : undefined;
+      const draft = newProductId ? perProductDraft.current.get(newProductId) : null;
+
+      if (draft) {
+        // 3a. Restore the draft the user was editing for this product
+        setPriceSource(draft.priceSource);
+        setCardCondition(draft.cardCondition);
+        setEbayCategory(draft.ebayCategory);
+        setSearchQuery(draft.searchQuery);
+        setEbayConfirmed(draft.ebayConfirmed);
+        setSelectedExternal(draft.selectedExternal);
+      } else if (tracked) {
+        // 3b. Pre-fill from the product's saved tracked config (first visit)
+        setPriceSource(tracked.priceSource);
+        setCardCondition(tracked.cardCondition);
+        if (tracked.priceSource === "ebay") {
+          setEbayCategory(tracked.ebayCategoryId ?? "183454");
+          setSearchQuery(tracked.ebaySearchQuery ?? "");
+          setEbayConfirmed(!!(tracked.ebaySearchQuery));
+          setSelectedExternal(null);
+        } else {
+          setSearchQuery(tracked.externalName ?? "");
+          setSelectedExternal(
+            tracked.externalId
+              ? { id: tracked.externalId, name: tracked.externalName ?? "" }
+              : null
+          );
+          setEbayConfirmed(false);
+        }
+      } else {
+        // 3c. Fresh product — reset to defaults
+        setPriceSource("ebay");
+        setCardCondition("near_mint");
+        setEbayCategory("183454");
+        setSearchQuery("");
+        setSelectedExternal(null);
+        setEbayConfirmed(false);
+      }
+    }
+    // For multi-select we leave the config alone so the user sets it intentionally
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds]);
 
   // ── Navigation states ────────────────────────────────────────────────────
   const isSearching =
@@ -318,13 +433,42 @@ export default function NewProduct() {
     actionData && "intent" in actionData && actionData.intent === "search_results"
       ? actionData.results : [];
 
-  const ebayPreviewListings: EbaySoldListing[] =
-    actionData && "intent" in actionData && actionData.intent === "ebay_preview"
-      ? actionData.listings : [];
-
-  const hasEbayError =
+  // Only treat actionData as valid if it belongs to the current selection.
+  // When the user picks a different product, previewGeneration is incremented
+  // so stale ebay_preview responses from the previous product are ignored.
+  const isCurrentPreview =
     actionData && "intent" in actionData &&
-    actionData.intent === "ebay_preview" && actionData.error;
+    actionData.intent === "ebay_preview" &&
+    actionData.generation === previewGeneration;
+
+  const ebayPreviewListings: EbaySoldListing[] = isCurrentPreview
+    ? (actionData as any).listings : [];
+
+  const ebayEffectiveQuery: string | null = isCurrentPreview
+    ? (actionData as any).effectiveQuery : null;
+
+  // True when preview results come from real sold transactions.
+  // False means eBay had no sold data and active listings were used instead.
+  const ebayUsedSoldData: boolean = isCurrentPreview
+    ? (actionData as any).usedSoldData ?? false : false;
+
+  // Average of the preview results — gives the merchant an upfront sense of
+  // what price will be used for tracking before they confirm.
+  const ebayPreviewAverage = useMemo(() => {
+    const valid = ebayPreviewListings.map((l) => l.price).filter((p) => p > 0);
+    if (valid.length === 0) return null;
+    return valid.reduce((sum, p) => sum + p, 0) / valid.length;
+  }, [ebayPreviewListings]);
+
+  const hasEbayError = isCurrentPreview && (actionData as any).error;
+
+  // ── Cost price missing check ─────────────────────────────────────────────
+  // True when we're ready to link but no cost price will be saved for any product
+  const costPriceMissing =
+    // Single: Shopify cost unchecked or unavailable, and no manual value entered
+    (isSingleSelect && ((!useShopifyCost && !costPriceShared) || (useShopifyCost && !shopifyCostForSingle && !costPriceShared))) ||
+    // Multi: opted out of Shopify cost AND no fallback entered (complete blank)
+    (isMultiSelect && !useShopifyCost && !costPriceShared);
 
   // ── Ready-to-link check ──────────────────────────────────────────────────
   const configReady =
@@ -346,10 +490,20 @@ export default function NewProduct() {
   }
 
   function handleEbayPreview() {
-    submit({ intent: "preview_ebay", query: searchQuery, categoryId: ebayCategory }, { method: "POST" });
+    // Reset confirmation so the results table is always visible after a new search,
+    // even if the user had previously confirmed a query for this product.
+    setEbayConfirmed(false);
+    submit(
+      { intent: "preview_ebay", query: searchQuery, categoryId: ebayCategory, generation: String(previewGeneration) },
+      { method: "POST" }
+    );
   }
 
   function handleLink() {
+    // Clear the draft for any products we're about to save so that after
+    // linking, re-selecting them loads the freshly-saved tracked config.
+    selectedIds.forEach((id) => perProductDraft.current.delete(id));
+
     if (isSingleSelect && singleProduct && singleVariant) {
       const isEbay = priceSource === "ebay";
       let costPrice = costPriceShared;
@@ -490,6 +644,8 @@ export default function NewProduct() {
                 selectable
                 renderItem={(product: any) => {
                   const variant = product.variants.edges[0]?.node;
+                  const isTracked = variant && trackedByVariantId.has(variant.id);
+                  const trackedConfig = isTracked ? trackedByVariantId.get(variant.id) : null;
                   return (
                     <ResourceItem
                       id={product.id}
@@ -509,9 +665,16 @@ export default function NewProduct() {
                       }
                     >
                       <BlockStack gap="100">
-                        <Text variant="bodyMd" fontWeight="semibold" as="span">
-                          {product.title}
-                        </Text>
+                        <InlineStack gap="200" blockAlign="center" wrap={false}>
+                          <Text variant="bodyMd" fontWeight="semibold" as="span">
+                            {product.title}
+                          </Text>
+                          {isTracked && (
+                            <Badge tone="success" size="small">
+                              {`✓ ${trackedConfig!.priceSource}`}
+                            </Badge>
+                          )}
+                        </InlineStack>
                         <Text variant="bodySm" tone="subdued" as="span">
                           {product.variants.edges.length} variant
                           {product.variants.edges.length !== 1 ? "s" : ""} · £{variant?.price}
@@ -548,11 +711,31 @@ export default function NewProduct() {
             </Card>
           ) : (
             <>
+              {/* ── Overwrite warning (multi-select) ───────────────────────── */}
+              {isMultiSelect && selectedWithExistingConfig.length > 0 && (
+                <Banner tone="warning" title="Some products already have a price source">
+                  <p>
+                    {selectedWithExistingConfig.length === 1
+                      ? `"${selectedWithExistingConfig[0].title}" already has a price source configured.`
+                      : `${selectedWithExistingConfig.length} of the selected products already have a price source configured.`}{" "}
+                    Saving will overwrite their existing settings.
+                  </p>
+                </Banner>
+              )}
+
               {/* ── Configure price source ─────────────────────────────────── */}
               <Card>
                 <BlockStack gap="400">
                   <BlockStack gap="050">
                     <Text variant="headingMd" as="h2">Configure price source</Text>
+                    {isSingleSelect && singleProduct && (() => {
+                      const variantId = singleProduct.variants.edges[0]?.node?.id;
+                      return variantId && trackedByVariantId.has(variantId);
+                    })() && (
+                      <Banner tone="info">
+                        <p>This product is already tracked — the existing settings have been pre-filled. Save to update them.</p>
+                      </Banner>
+                    )}
                     {isMultiSelect && (
                       <Text variant="bodySm" tone="subdued" as="p">
                         Applies to all {selectedIds.length} selected products.
@@ -605,7 +788,14 @@ export default function NewProduct() {
                           <TextField
                             label="eBay search query"
                             value={searchQuery}
-                            onChange={(v) => { setSearchQuery(v); setEbayConfirmed(false); }}
+                            onChange={(v) => {
+                              setSearchQuery(v);
+                              setEbayConfirmed(false);
+                              // Auto-switch category when a grading service is detected
+                              if (/\b(psa|bgs|cgc|sgc|ace)\b/i.test(v)) {
+                                setEbayCategory("261328");
+                              }
+                            }}
                             placeholder='"Charizard Obsidian Flames 199/197 PSA 10" GBP'
                             autoComplete="off"
                             helpText="Include condition/grade, set name, and card number"
@@ -628,12 +818,44 @@ export default function NewProduct() {
 
                           {ebayPreviewListings.length > 0 && !ebayConfirmed && (
                             <BlockStack gap="300">
+                              {/* Data source indicator */}
+                              {ebayUsedSoldData ? (
+                                <Banner tone="success" title="Showing sold listings">
+                                  <p>
+                                    Prices below are from completed transactions — what buyers
+                                    actually paid on eBay. This is the most accurate signal for
+                                    true market value.
+                                  </p>
+                                </Banner>
+                              ) : (
+                                <Banner tone="warning" title="No sold listings found — showing active listings">
+                                  <p>
+                                    eBay returned no recent sold data for this query. The prices
+                                    below are from active (unsold) listings and may not reflect
+                                    what buyers are actually paying. Consider refining your query
+                                    or checking eBay directly.
+                                  </p>
+                                </Banner>
+                              )}
+
+                              {/* Simplified query notice */}
+                              {ebayEffectiveQuery && ebayEffectiveQuery !== searchQuery && (
+                                <Banner tone="info" title="Search was simplified">
+                                  <p>
+                                    No results were found for your exact query. eBay was searched
+                                    using a simplified version instead:{" "}
+                                    <strong>"{ebayEffectiveQuery}"</strong>. The listings below
+                                    reflect that broader search — confirm only if they match the
+                                    card you want to track.
+                                  </p>
+                                </Banner>
+                              )}
                               <Text variant="bodyMd" fontWeight="semibold" as="p">
-                                Top {ebayPreviewListings.length} recent sold listings:
+                                Top {ebayPreviewListings.length} {ebayUsedSoldData ? "sold" : "active"} listings:
                               </Text>
                               <DataTable
                                 columnContentTypes={["text", "text", "text", "text"]}
-                                headings={["Title", "Price", "Condition", "Date"]}
+                                headings={["Title", "Price", "Condition", ebayUsedSoldData ? "Sold date" : "Listed date"]}
                                 rows={ebayPreviewListings.map((l) => [
                                   <Text as="span" variant="bodySm" key={l.itemUrl}>
                                     <Link url={l.itemUrl} external>
@@ -645,6 +867,32 @@ export default function NewProduct() {
                                   l.soldDate ? new Date(l.soldDate).toLocaleDateString("en-GB") : "—",
                                 ])}
                               />
+
+                              {/* Average price summary */}
+                              {ebayPreviewAverage !== null && (
+                                <Box
+                                  padding="400"
+                                  background="bg-surface-secondary"
+                                  borderRadius="200"
+                                  borderWidth="025"
+                                  borderColor="border"
+                                >
+                                  <InlineStack align="space-between" blockAlign="center">
+                                    <BlockStack gap="100">
+                                      <Text variant="bodyMd" fontWeight="semibold" as="p">
+                                        Estimated tracking price
+                                      </Text>
+                                      <Text variant="bodySm" tone="subdued" as="p">
+                                        Average of {ebayPreviewListings.length} {ebayUsedSoldData ? "sold" : "active"} listings shown · actual sync uses up to 50
+                                      </Text>
+                                    </BlockStack>
+                                    <Text variant="headingLg" as="p" fontWeight="bold">
+                                      £{ebayPreviewAverage.toFixed(2)}
+                                    </Text>
+                                  </InlineStack>
+                                </Box>
+                              )}
+
                               <Banner tone="warning" title="Do these look right?">
                                 <p>
                                   If they don't match, refine your query and preview again.
@@ -661,24 +909,51 @@ export default function NewProduct() {
                             </BlockStack>
                           )}
 
-                          {ebayPreviewListings.length === 0 &&
-                            actionData && "intent" in actionData &&
-                            actionData.intent === "ebay_preview" && !hasEbayError && (
-                              <Banner tone="warning" title="No results found">
-                                <p>
-                                  Try broadening the search — remove the condition/grade and search
-                                  by card name and set only.
-                                </p>
-                              </Banner>
-                            )}
+                          {isCurrentPreview && ebayPreviewListings.length === 0 && !hasEbayError && (
+                            <Banner tone="warning" title="No listings found for this query">
+                              <p>
+                                eBay returned no active listings for this search. Try:
+                              </p>
+                              <ul>
+                                <li>Removing the grade or condition (e.g. drop "Pristine" or "PSA 10")</li>
+                                <li>Shortening to card name + set name only</li>
+                                <li>Checking the card number format (e.g. "199/197" vs "199")</li>
+                              </ul>
+                            </Banner>
+                          )}
 
                           {ebayConfirmed && (
-                            <Banner tone="success" title="Search confirmed">
-                              <p>
-                                <strong>"{searchQuery}"</strong> ·{" "}
-                                {EBAY_POKEMON_CATEGORIES.find((c) => c.value === ebayCategory)?.label}
-                              </p>
-                            </Banner>
+                            <BlockStack gap="300">
+                              <Banner tone="success" title="Search confirmed">
+                                <p>
+                                  <strong>"{searchQuery}"</strong> ·{" "}
+                                  {EBAY_POKEMON_CATEGORIES.find((c) => c.value === ebayCategory)?.label}
+                                </p>
+                              </Banner>
+                              {ebayPreviewAverage !== null && (
+                                <Box
+                                  padding="400"
+                                  background="bg-surface-secondary"
+                                  borderRadius="200"
+                                  borderWidth="025"
+                                  borderColor="border"
+                                >
+                                  <InlineStack align="space-between" blockAlign="center">
+                                    <BlockStack gap="100">
+                                      <Text variant="bodyMd" fontWeight="semibold" as="p">
+                                        Estimated tracking price
+                                      </Text>
+                                      <Text variant="bodySm" tone="subdued" as="p">
+                                        Average of {ebayPreviewListings.length} {ebayUsedSoldData ? "sold" : "active"} listings · actual sync uses up to 50
+                                      </Text>
+                                    </BlockStack>
+                                    <Text variant="headingLg" as="p" fontWeight="bold">
+                                      £{ebayPreviewAverage.toFixed(2)}
+                                    </Text>
+                                  </InlineStack>
+                                </Box>
+                              )}
+                            </BlockStack>
                           )}
                         </BlockStack>
                       )}
@@ -746,7 +1021,7 @@ export default function NewProduct() {
               </Card>
 
               {/* ── Cost price ─────────────────────────────────────────────── */}
-              {configReady && (
+              {selectedIds.length > 0 && (
                 <Card>
                   <BlockStack gap="400">
                     <BlockStack gap="050">
@@ -756,41 +1031,77 @@ export default function NewProduct() {
                       </Text>
                     </BlockStack>
 
-                    <Checkbox
-                      label={
-                        isMultiSelect
-                          ? "Use each product's Shopify cost price where available"
-                          : shopifyCostForSingle
-                          ? `Use Shopify cost price (£${shopifyCostForSingle.toFixed(2)})`
-                          : "Use Shopify cost price (not set for this product)"
-                      }
-                      checked={useShopifyCost}
-                      onChange={setUseShopifyCost}
-                      disabled={!isMultiSelect && !shopifyCostForSingle}
-                    />
+                    {/* Single product — Shopify cost available: offer checkbox to use it */}
+                    {isSingleSelect && shopifyCostForSingle && (
+                      <>
+                        <Checkbox
+                          label={`Use Shopify cost price (£${shopifyCostForSingle.toFixed(2)})`}
+                          checked={useShopifyCost}
+                          onChange={setUseShopifyCost}
+                        />
+                        {!useShopifyCost && (
+                          <TextField
+                            label="Cost price (£)"
+                            type="number"
+                            value={costPriceShared}
+                            onChange={setCostPriceShared}
+                            autoComplete="off"
+                            placeholder="e.g. 12.50"
+                            prefix="£"
+                            helpText="What you paid — used as the anchor for floor price rules."
+                          />
+                        )}
+                      </>
+                    )}
 
-                    {(!useShopifyCost || isMultiSelect) && (
+                    {/* Single product — no Shopify cost: just show the text field */}
+                    {isSingleSelect && !shopifyCostForSingle && (
                       <TextField
-                        label={
-                          isMultiSelect
-                            ? "Fallback cost price (£)"
-                            : "Cost price (£)"
-                        }
+                        label="Cost price (£)"
                         type="number"
                         value={costPriceShared}
                         onChange={setCostPriceShared}
                         autoComplete="off"
                         placeholder="e.g. 12.50"
                         prefix="£"
-                        helpText={
-                          isMultiSelect
-                            ? "Applied to products where Shopify cost is not set."
-                            : "What you paid — used as the anchor for floor price rules."
-                        }
+                        helpText="What you paid — used as the anchor for floor price rules."
                       />
+                    )}
+
+                    {/* Multi-select: checkbox for Shopify cost + fallback field */}
+                    {isMultiSelect && (
+                      <>
+                        <Checkbox
+                          label="Use each product's Shopify cost price where available"
+                          checked={useShopifyCost}
+                          onChange={setUseShopifyCost}
+                        />
+                        <TextField
+                          label="Fallback cost price (£)"
+                          type="number"
+                          value={costPriceShared}
+                          onChange={setCostPriceShared}
+                          autoComplete="off"
+                          placeholder="e.g. 12.50"
+                          prefix="£"
+                          helpText="Applied to products where Shopify cost is not set."
+                        />
+                      </>
                     )}
                   </BlockStack>
                 </Card>
+              )}
+
+              {/* ── Cost price warning ──────────────────────────────────────── */}
+              {configReady && costPriceMissing && (
+                <Banner tone="warning" title="No cost price set">
+                  <p>
+                    Without a cost price, floor price rules cannot protect your margin.{" "}
+                    {isMultiSelect
+                      ? "Set a fallback cost price above, or each product's Shopify cost will be used where available."
+                      : "Set a cost price above to enable floor price protection."}
+                  </p>
+                </Banner>
               )}
 
               {/* ── Link button ─────────────────────────────────────────────── */}

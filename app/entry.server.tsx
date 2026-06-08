@@ -7,13 +7,9 @@ import { isbot } from "isbot";
 import { renderToPipeableStream } from "react-dom/server";
 import { startCronJobs } from "./lib/cron.server";
 
-// Start background jobs when server boots
-if (process.env.NODE_ENV === "production") {
-  startCronJobs();
-} else {
-  // In dev, only start if not already running (HMR restarts)
-  startCronJobs();
-}
+// Start background jobs when server boots.
+// The isScheduled guard inside startCronJobs() prevents double-scheduling on HMR restarts.
+startCronJobs();
 
 const ABORT_DELAY = 5_000;
 

@@ -84,60 +84,150 @@ async function updateShopifyPrice(
   }
 }
 
+type InventoryResult = { ok: true } | { ok: false; error: string };
+
 async function setShopifyInventory(
   shop: string,
   accessToken: string,
   variantId: string,
   quantity: number
-): Promise<boolean> {
+): Promise<InventoryResult> {
   const numericId = variantId.replace(/^gid:\/\/shopify\/ProductVariant\//, "");
+  const headers = { "X-Shopify-Access-Token": accessToken };
+
+  // Helper: extract a readable error from a Shopify error response body
+  function parseShopifyError(body: string, status: number): string {
+    try {
+      const parsed = JSON.parse(body);
+      const msgs: string[] =
+        parsed?.errors
+          ? (typeof parsed.errors === "string"
+              ? [parsed.errors]
+              : Object.values(parsed.errors as Record<string, string | string[]>).flat())
+          : [];
+      if (msgs.length > 0) return msgs.join("; ");
+    } catch {
+      // not JSON — use raw text
+    }
+    return body.trim() || `HTTP ${status}`;
+  }
 
   try {
-    // Step 1: get inventory_item_id for this variant
+    // Step 1: get variant → inventory_item_id + tracking status
     const variantResp = await fetch(
       `https://${shop}/admin/api/2024-01/variants/${numericId}.json`,
-      { headers: { "X-Shopify-Access-Token": accessToken } }
+      { headers }
     );
-    if (!variantResp.ok) return false;
-    const variantData = await variantResp.json();
-    const inventoryItemId = variantData.variant?.inventory_item_id;
-    if (!inventoryItemId) return false;
+    if (!variantResp.ok) {
+      const body = await variantResp.text();
+      const err = `Could not fetch variant from Shopify (${variantResp.status}): ${parseShopifyError(body, variantResp.status)}`;
+      console.error(`[PriceEngine] setShopifyInventory: ${err}`);
+      return { ok: false, error: err };
+    }
+    const { variant } = await variantResp.json();
+    const inventoryItemId: number | undefined = variant?.inventory_item_id;
+    if (!inventoryItemId) {
+      const err = `Variant ${numericId} has no inventory_item_id — this product type may not support inventory management (e.g. gift cards).`;
+      console.error(`[PriceEngine] setShopifyInventory: ${err}`);
+      return { ok: false, error: err };
+    }
 
-    // Step 2: get the primary location
-    const locResp = await fetch(
-      `https://${shop}/admin/api/2024-01/locations.json`,
-      { headers: { "X-Shopify-Access-Token": accessToken } }
+    // Step 2: enable Shopify inventory tracking if not already on
+    if (variant.inventory_management !== "shopify") {
+      console.log(`[PriceEngine] Variant ${numericId} inventory_management="${variant.inventory_management}" — attempting to enable Shopify tracking`);
+      const enableResp = await fetch(
+        `https://${shop}/admin/api/2024-01/variants/${numericId}.json`,
+        {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ variant: { id: numericId, inventory_management: "shopify" } }),
+        }
+      );
+      if (!enableResp.ok) {
+        const body = await enableResp.text();
+        const err = `Cannot enable inventory tracking on this variant (${enableResp.status}): ${parseShopifyError(body, enableResp.status)}. This product type may not support inventory management.`;
+        console.error(`[PriceEngine] setShopifyInventory: ${err}`);
+        return { ok: false, error: err };
+      }
+      console.log(`[PriceEngine] Inventory tracking enabled for variant ${numericId}`);
+    }
+
+    // Step 3: find the location where this inventory item is already stocked
+    const levelsResp = await fetch(
+      `https://${shop}/admin/api/2024-01/inventory_levels.json?inventory_item_ids=${inventoryItemId}`,
+      { headers }
     );
-    if (!locResp.ok) return false;
-    const locData = await locResp.json();
-    const locationId = locData.locations?.[0]?.id;
-    if (!locationId) return false;
+    let locationId: number | undefined;
+    if (levelsResp.ok) {
+      const levelsData = await levelsResp.json();
+      const levels: Array<{ location_id: number; available: number }> = levelsData.inventory_levels ?? [];
+      if (levels.length > 0) {
+        levels.sort((a, b) => (b.available ?? 0) - (a.available ?? 0));
+        locationId = levels[0].location_id;
+        console.log(`[PriceEngine] Using location ${locationId} (${levels.length} level(s) for item ${inventoryItemId})`);
+      }
+    }
 
-    // Step 3: set inventory level
-    const invResp = await fetch(
+    // Step 4: no existing level — fall back to first location and connect
+    if (!locationId) {
+      const locResp = await fetch(`https://${shop}/admin/api/2024-01/locations.json`, { headers });
+      if (!locResp.ok) {
+        const body = await locResp.text();
+        const err = `Could not fetch store locations (${locResp.status}): ${parseShopifyError(body, locResp.status)}`;
+        console.error(`[PriceEngine] setShopifyInventory: ${err}`);
+        return { ok: false, error: err };
+      }
+      const { locations } = await locResp.json();
+      locationId = locations?.[0]?.id;
+      if (!locationId) {
+        const err = "No locations found for this store — inventory cannot be managed.";
+        console.error(`[PriceEngine] setShopifyInventory: ${err}`);
+        return { ok: false, error: err };
+      }
+
+      const connectResp = await fetch(
+        `https://${shop}/admin/api/2024-01/inventory_levels/connect.json`,
+        {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ location_id: locationId, inventory_item_id: inventoryItemId }),
+        }
+      );
+      if (!connectResp.ok) {
+        const body = await connectResp.text();
+        if (!body.toLowerCase().includes("already")) {
+          const err = `Could not connect inventory item to location (${connectResp.status}): ${parseShopifyError(body, connectResp.status)}`;
+          console.error(`[PriceEngine] setShopifyInventory: ${err}`);
+          return { ok: false, error: err };
+        }
+      } else {
+        console.log(`[PriceEngine] Connected item ${inventoryItemId} to location ${locationId}`);
+      }
+    }
+
+    // Step 5: set the inventory level
+    const setResp = await fetch(
       `https://${shop}/admin/api/2024-01/inventory_levels/set.json`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": accessToken,
-        },
-        body: JSON.stringify({
-          location_id: locationId,
-          inventory_item_id: inventoryItemId,
-          available: quantity,
-        }),
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ location_id: locationId, inventory_item_id: inventoryItemId, available: quantity }),
       }
     );
 
-    if (!invResp.ok) {
-      const body = await invResp.text();
-      console.error(`[PriceEngine] setShopifyInventory failed (${invResp.status}): ${body}`);
+    if (!setResp.ok) {
+      const body = await setResp.text();
+      const err = `Shopify rejected the inventory update (${setResp.status}): ${parseShopifyError(body, setResp.status)}`;
+      console.error(`[PriceEngine] setShopifyInventory: ${err}`);
+      return { ok: false, error: err };
     }
-    return invResp.ok;
+
+    console.log(`[PriceEngine] ✓ Inventory set to ${quantity} for variant ${numericId} at location ${locationId}`);
+    return { ok: true };
   } catch (error) {
-    console.error("[PriceEngine] setShopifyInventory network error:", error);
-    return false;
+    const err = `Network error while updating Shopify inventory: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(`[PriceEngine] setShopifyInventory: ${err}`);
+    return { ok: false, error: err };
   }
 }
 
@@ -217,6 +307,8 @@ async function sendAlerts(
 interface RuleResult {
   actionTaken: string;
   actionDetail: string;
+  /** The price actually written to Shopify (if different from market price) */
+  appliedShopifyPrice?: number;
 }
 
 async function evaluateRules(
@@ -235,6 +327,14 @@ async function evaluateRules(
   const changePercent = ((newPrice - previousPrice) / previousPrice) * 100;
   const enabledRules = rules.filter((r) => r.isEnabled);
 
+  console.log(
+    `[PriceEngine] evaluateRules: "${product.shopifyProductTitle}" | change ${changePercent.toFixed(2)}% | ${enabledRules.length} enabled rule(s): [${enabledRules.map((r) => `${r.ruleType}/${r.action}`).join(", ")}]`
+  );
+
+  if (enabledRules.length === 0) {
+    return { actionTaken: "nothing", actionDetail: `Market price is £${newPrice.toFixed(2)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(1)}% vs your store price of £${previousPrice.toFixed(2)}). No automation rules are configured, so no action was taken.` };
+  }
+
   // Rule priority order: floor → drop → rise → notify
   const ruleOrder = ["price_floor", "price_drop", "price_rise", "notify"];
   const sorted = [...enabledRules].sort(
@@ -242,7 +342,8 @@ async function evaluateRules(
   );
 
   let actionTaken = "nothing";
-  let actionDetail = `Price changed ${changePercent.toFixed(2)}% — no rules triggered`;
+  let actionDetail = `Market price is £${newPrice.toFixed(2)} (${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(1)}% vs store price £${previousPrice.toFixed(2)}). Rules were checked but none matched the current conditions.`;
+  let appliedShopifyPrice: number | undefined;
 
   for (const rule of sorted) {
     // ── Floor check ──────────────────────────────────────────────────────────
@@ -253,54 +354,77 @@ async function evaluateRules(
         );
         continue;
       }
-      // Floor = cost price + configured margin %
       const marginPct = rule.actionValue ?? 10;
       const floorPrice = product.costPrice * (1 + marginPct / 100);
 
       if (newPrice < floorPrice) {
         if (rule.action === "disable_product") {
-          // Set out of stock instead of forcing the floor price
-          const disabled = await setShopifyInventory(shop, accessToken, product.shopifyVariantId, 0);
-          if (disabled) {
+          const invResult = await setShopifyInventory(shop, accessToken, product.shopifyVariantId, 0);
+          if (invResult.ok) {
             await prisma.trackedProduct.update({
               where: { id: product.id },
               data: { disabledByRule: true },
             });
-            const detail = `Set out of stock: market £${newPrice.toFixed(2)} below floor £${floorPrice.toFixed(2)} (cost £${product.costPrice.toFixed(2)} + ${marginPct}% margin)`;
+            const detail = `Product set to out of stock by rule "${rule.name}". Market price £${newPrice.toFixed(2)} fell below the floor of £${floorPrice.toFixed(2)}, calculated from your cost price (£${product.costPrice.toFixed(2)}) plus ${marginPct}% minimum margin. Shopify inventory set to 0.`;
             await sendAlerts(settings, product.shopifyProductTitle, "product_disabled", detail, newPrice, previousPrice, changePercent);
             return { actionTaken: "product_disabled", actionDetail: detail };
+          } else {
+            console.error(`[PriceEngine] Floor rule "${rule.name}" matched but setShopifyInventory failed: ${invResult.error}`);
+            actionDetail = `Rule "${rule.name}" triggered (floor breach): ${invResult.error}`;
           }
         } else {
-          // Default: apply floor price
           const applied = await updateShopifyPrice(shop, accessToken, product.shopifyVariantId, floorPrice);
           if (applied) {
-            const detail = `Floor £${floorPrice.toFixed(2)} applied (cost £${product.costPrice.toFixed(2)} + ${marginPct}% margin; market was £${newPrice.toFixed(2)})`;
+            const detail = `Floor price protection triggered by rule "${rule.name}". Market price £${newPrice.toFixed(2)} fell below the minimum of £${floorPrice.toFixed(2)} (cost £${product.costPrice.toFixed(2)} + ${marginPct}% margin). Shopify price set to £${floorPrice.toFixed(2)} to protect your margin.`;
             await sendAlerts(settings, product.shopifyProductTitle, "floor_applied", detail, floorPrice, previousPrice, changePercent);
-            return { actionTaken: "floor_applied", actionDetail: detail };
+            // Don't return — allow subsequent rules (e.g. price_drop/disable) to also evaluate
+            actionTaken = "floor_applied";
+            actionDetail = detail;
+            appliedShopifyPrice = floorPrice;
+          } else {
+            console.error(`[PriceEngine] Floor rule "${rule.name}" matched but updateShopifyPrice failed`);
+            actionDetail = `Rule "${rule.name}" triggered: market £${newPrice.toFixed(2)} is below floor £${floorPrice.toFixed(2)}, but the Shopify price update failed. Check your Shopify access token has write_products permission.`;
           }
         }
       }
-      continue; // Floor rule checked — move to next regardless
+      continue;
     }
 
     // ── Price drop ───────────────────────────────────────────────────────────
     if (rule.ruleType === "price_drop" && changePercent <= -(rule.thresholdPct ?? 0)) {
+      console.log(`[PriceEngine] Price drop rule "${rule.name}" matched (${changePercent.toFixed(2)}% <= -${rule.thresholdPct}%) — action: ${rule.action}`);
       if (rule.action === "disable_product") {
-        const disabled = await setShopifyInventory(shop, accessToken, product.shopifyVariantId, 0);
-        if (disabled) {
+        const invResult = await setShopifyInventory(shop, accessToken, product.shopifyVariantId, 0);
+        if (invResult.ok) {
           await prisma.trackedProduct.update({
             where: { id: product.id },
             data: { disabledByRule: true },
           });
-          const detail = `Disabled: price dropped ${Math.abs(changePercent).toFixed(1)}% (threshold: ${rule.thresholdPct}%)`;
+          const detail = `Product set to out of stock by rule "${rule.name}". Market price dropped ${Math.abs(changePercent).toFixed(1)}% (from £${previousPrice.toFixed(2)} to £${newPrice.toFixed(2)}), which exceeded your ${rule.thresholdPct}% threshold. Shopify inventory set to 0.`;
           await sendAlerts(settings, product.shopifyProductTitle, "product_disabled", detail, newPrice, previousPrice, changePercent);
           return { actionTaken: "product_disabled", actionDetail: detail };
+        } else {
+          console.error(`[PriceEngine] Price drop rule "${rule.name}" matched but setShopifyInventory failed: ${invResult.error}`);
+          actionTaken = "rule_failed";
+          actionDetail = `Rule "${rule.name}" triggered: price dropped ${Math.abs(changePercent).toFixed(1)}% (from £${previousPrice.toFixed(2)} to £${newPrice.toFixed(2)}), exceeding your ${rule.thresholdPct}% threshold — but the inventory update failed. Reason: ${invResult.error}`;
         }
       } else if (rule.action === "update_price") {
         const updated = await updateShopifyPrice(shop, accessToken, product.shopifyVariantId, newPrice);
         if (updated) {
           actionTaken = "price_updated";
-          actionDetail = `Price lowered to £${newPrice.toFixed(2)} (market dropped ${Math.abs(changePercent).toFixed(1)}%)`;
+          actionDetail = `Shopify price lowered to £${newPrice.toFixed(2)} to match the market. Price dropped ${Math.abs(changePercent).toFixed(1)}% from £${previousPrice.toFixed(2)}, triggered by rule "${rule.name}" (threshold: ${rule.thresholdPct}%).`;
+        } else {
+          console.error(`[PriceEngine] Price drop rule "${rule.name}" matched but updateShopifyPrice failed`);
+          actionTaken = "rule_failed";
+          actionDetail = `Rule "${rule.name}" triggered: price dropped ${Math.abs(changePercent).toFixed(1)}% (from £${previousPrice.toFixed(2)} to £${newPrice.toFixed(2)}), but the Shopify price update failed. Check your Shopify access token has write_products permission.`;
+        }
+      } else if (rule.action === "notify_only") {
+        // Alert only — no price change, no inventory change
+        const detail = `Alert sent: market price dropped ${Math.abs(changePercent).toFixed(1)}% (from £${previousPrice.toFixed(2)} to £${newPrice.toFixed(2)}), exceeding your ${rule.thresholdPct}% drop threshold for rule "${rule.name}". No price changes were made.`;
+        await sendAlerts(settings, product.shopifyProductTitle, "notified", detail, newPrice, previousPrice, changePercent);
+        if (actionTaken === "nothing") {
+          actionTaken = "notified";
+          actionDetail = detail;
         }
       }
       continue;
@@ -308,19 +432,40 @@ async function evaluateRules(
 
     // ── Price rise ───────────────────────────────────────────────────────────
     if (rule.ruleType === "price_rise" && changePercent >= (rule.thresholdPct ?? 0)) {
+      console.log(`[PriceEngine] Price rise rule "${rule.name}" matched (${changePercent.toFixed(2)}% >= ${rule.thresholdPct}%) — action: ${rule.action}`);
       if (rule.action === "update_price") {
         const updated = await updateShopifyPrice(shop, accessToken, product.shopifyVariantId, newPrice);
         if (updated) {
-          // If a drop rule had previously disabled this product, re-enable it
           if (product.disabledByRule) {
-            await setShopifyInventory(shop, accessToken, product.shopifyVariantId, 1);
-            await prisma.trackedProduct.update({
-              where: { id: product.id },
-              data: { disabledByRule: false },
-            });
+            const invResult = await setShopifyInventory(shop, accessToken, product.shopifyVariantId, 1);
+            if (invResult.ok) {
+              await prisma.trackedProduct.update({
+                where: { id: product.id },
+                data: { disabledByRule: false },
+              });
+              actionTaken = "price_updated";
+              actionDetail = `Shopify price raised to £${newPrice.toFixed(2)} to match the market. Price rose ${changePercent.toFixed(1)}% from £${previousPrice.toFixed(2)}, triggered by rule "${rule.name}" (threshold: ${rule.thresholdPct}%). Product was previously out of stock — inventory has been restored to 1.`;
+            } else {
+              console.error(`[PriceEngine] Price rise rule "${rule.name}": price updated but inventory restore failed: ${invResult.error}`);
+              actionTaken = "rule_failed";
+              actionDetail = `Rule "${rule.name}" raised the Shopify price to £${newPrice.toFixed(2)}, but the inventory restore failed so the product remains out of stock. Reason: ${invResult.error}`;
+            }
+          } else {
+            actionTaken = "price_updated";
+            actionDetail = `Shopify price raised to £${newPrice.toFixed(2)} to match the market. Price rose ${changePercent.toFixed(1)}% from £${previousPrice.toFixed(2)}, triggered by rule "${rule.name}" (threshold: ${rule.thresholdPct}%).`;
           }
-          actionTaken = "price_updated";
-          actionDetail = `Price raised to £${newPrice.toFixed(2)} (market rose ${changePercent.toFixed(1)}%)`;
+        } else {
+          console.error(`[PriceEngine] Price rise rule "${rule.name}" matched but updateShopifyPrice failed`);
+          actionTaken = "rule_failed";
+          actionDetail = `Rule "${rule.name}" triggered: price rose ${changePercent.toFixed(1)}% (from £${previousPrice.toFixed(2)} to £${newPrice.toFixed(2)}), but the Shopify price update failed. Check your Shopify access token has write_products permission.`;
+        }
+      } else if (rule.action === "notify_only") {
+        // Alert only — no price change
+        const detail = `Alert sent: market price rose ${changePercent.toFixed(1)}% (from £${previousPrice.toFixed(2)} to £${newPrice.toFixed(2)}), exceeding your ${rule.thresholdPct}% rise threshold for rule "${rule.name}". No price changes were made.`;
+        await sendAlerts(settings, product.shopifyProductTitle, "notified", detail, newPrice, previousPrice, changePercent);
+        if (actionTaken === "nothing") {
+          actionTaken = "notified";
+          actionDetail = detail;
         }
       }
       continue;
@@ -328,7 +473,7 @@ async function evaluateRules(
 
     // ── Notify only ──────────────────────────────────────────────────────────
     if (rule.ruleType === "notify" && Math.abs(changePercent) >= (rule.thresholdPct ?? 0)) {
-      const detail = `Price moved ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(1)}% (threshold: ±${rule.thresholdPct}%)`;
+      const detail = `Alert sent: market price moved ${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(1)}% (from £${previousPrice.toFixed(2)} to £${newPrice.toFixed(2)}), exceeding your ±${rule.thresholdPct}% alert threshold for rule "${rule.name}". No price changes were made.`;
       await sendAlerts(settings, product.shopifyProductTitle, "notified", detail, newPrice, previousPrice, changePercent);
       if (actionTaken === "nothing") {
         actionTaken = "notified";
@@ -337,7 +482,7 @@ async function evaluateRules(
     }
   }
 
-  return { actionTaken, actionDetail };
+  return { actionTaken, actionDetail, appliedShopifyPrice };
 }
 
 // ── Main sync function ───────────────────────────────────────────────────────
@@ -356,52 +501,92 @@ export async function checkAndSyncProduct(
     return;
   }
 
-  const previousPrice = product.lastKnownPrice ?? product.baselinePrice ?? 0;
-  const changePercent =
-    previousPrice > 0 ? ((newPrice - previousPrice) / previousPrice) * 100 : 0;
+  // For the activity log: how has the raw market price moved since last fetch?
+  const lastMarketPrice = product.lastKnownPrice ?? product.baselinePrice ?? 0;
+  const marketChangePercent =
+    lastMarketPrice > 0 ? ((newPrice - lastMarketPrice) / lastMarketPrice) * 100 : 0;
 
-  const { actionTaken, actionDetail } = await evaluateRules(
+  // For rule evaluation: compare market price against what the store is actually selling for.
+  // This ensures rules always fire when there's a gap between market and store price —
+  // even if lastKnownPrice has already caught up (e.g. rule added after first sync).
+  const ruleBasePrice =
+    product.shopifyCurrentPrice > 0 ? product.shopifyCurrentPrice : lastMarketPrice;
+
+  const { actionTaken, actionDetail, appliedShopifyPrice } = await evaluateRules(
     product,
     newPrice,
-    previousPrice,
+    ruleBasePrice,
     rules,
     shop,
     accessToken,
     settings
   );
 
-  // Persist updated price and timestamp
+  // Persist updated market price and timestamp.
+  // Mirror the Shopify price in shopifyCurrentPrice whenever we write a new price
+  // to Shopify, so the next sync compares against the actual current store price
+  // rather than a stale value that would re-trigger the same rule.
+  const newShopifyPrice =
+    actionTaken === "price_updated"
+      ? newPrice
+      : actionTaken === "floor_applied" && appliedShopifyPrice != null
+      ? appliedShopifyPrice
+      : undefined;
+
   await prisma.trackedProduct.update({
     where: { id: product.id },
     data: {
       lastKnownPrice: newPrice,
       lastCheckedAt: new Date(),
+      ...(newShopifyPrice != null ? { shopifyCurrentPrice: newShopifyPrice } : {}),
     },
   });
 
-  // Log every check
+  // Log every check — use market movement for the displayed change %
   await prisma.priceLog.create({
     data: {
       storeId: product.storeId,
       trackedProductId: product.id,
       priceSource: product.priceSource,
       fetchedPrice: newPrice,
-      previousPrice: previousPrice > 0 ? previousPrice : null,
-      changePercent: previousPrice > 0 ? changePercent : null,
+      previousPrice: ruleBasePrice > 0 ? ruleBasePrice : null,
+      changePercent: ruleBasePrice > 0
+        ? ((newPrice - ruleBasePrice) / ruleBasePrice) * 100
+        : null,
       actionTaken,
       actionDetail,
     },
   });
 
-  const sign = changePercent >= 0 ? "+" : "";
+  const ruleChangePct = ruleBasePrice > 0
+    ? ((newPrice - ruleBasePrice) / ruleBasePrice) * 100
+    : 0;
+  const sign = ruleChangePct >= 0 ? "+" : "";
   console.log(
-    `[PriceEngine] ${product.shopifyProductTitle}: £${previousPrice.toFixed(2)} → £${newPrice.toFixed(2)} (${sign}${changePercent.toFixed(1)}%) → ${actionTaken}`
+    `[PriceEngine] ${product.shopifyProductTitle}: store £${ruleBasePrice.toFixed(2)} / market £${newPrice.toFixed(2)} (${sign}${ruleChangePct.toFixed(1)}%) → ${actionTaken}`
   );
 }
 
 // ── Store-level sync ─────────────────────────────────────────────────────────
 
+/** Tracks which stores currently have a sync in progress (server-process scoped). */
+const activeSyncs = new Set<string>();
+
 export async function runSyncForStore(storeId: string): Promise<void> {
+  if (activeSyncs.has(storeId)) {
+    console.warn(`[PriceEngine] Sync for store ${storeId} is already in progress — skipping duplicate run`);
+    return;
+  }
+  activeSyncs.add(storeId);
+
+  try {
+    return await _runSyncForStore(storeId);
+  } finally {
+    activeSyncs.delete(storeId);
+  }
+}
+
+async function _runSyncForStore(storeId: string): Promise<void> {
   const store = await prisma.store.findUnique({
     where: { id: storeId },
     include: {
@@ -414,6 +599,30 @@ export async function runSyncForStore(storeId: string): Promise<void> {
   if (!store) {
     console.error(`[PriceEngine] Store ${storeId} not found`);
     return;
+  }
+
+  // Prefer the offline session token (always kept current by the Shopify SDK)
+  // over store.accessToken, which is only refreshed when the merchant visits
+  // the dashboard. Using a stale store.accessToken is the most common cause of
+  // rule_failed entries immediately after linking a product from another page.
+  const offlineSession = await prisma.session.findFirst({
+    where: { shop: store.shop, isOnline: false },
+    orderBy: { id: "desc" },
+  });
+  const accessToken = offlineSession?.accessToken ?? store.accessToken;
+
+  if (!accessToken) {
+    console.error(`[PriceEngine] No access token available for ${store.shop} — sync aborted`);
+    return;
+  }
+
+  // Keep Store.accessToken in sync so it's fresh for the next run too
+  if (offlineSession?.accessToken && offlineSession.accessToken !== store.accessToken) {
+    await prisma.store.update({
+      where: { id: storeId },
+      data: { accessToken: offlineSession.accessToken },
+    });
+    console.log(`[PriceEngine] Updated stored access token for ${store.shop} from offline session`);
   }
 
   const settings: AlertSettings = store.settings ?? {
@@ -429,9 +638,15 @@ export async function runSyncForStore(storeId: string): Promise<void> {
 
   // Process sequentially — be polite to rate limits
   for (const product of store.products) {
-    await checkAndSyncProduct(product, store.rules, store.shop, store.accessToken, settings);
+    await checkAndSyncProduct(product, store.rules, store.shop, accessToken, settings);
     await new Promise((r) => setTimeout(r, 500)); // 500ms between API calls
   }
+
+  // Stamp the completed sync time so the cron can respect pollIntervalMinutes
+  await prisma.store.update({
+    where: { id: storeId },
+    data: { lastSyncAt: new Date() },
+  });
 
   console.log(`[PriceEngine] Sync complete for ${store.shop}`);
 }

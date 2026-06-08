@@ -18,11 +18,10 @@ redirect_urls = [
 
 [webhooks]
 api_version = "2024-01"
-# Webhook subscriptions are disabled for local --use-localhost dev.
-# Re-add when deploying to production with a real HTTPS URL.
-# [[webhooks.subscriptions]]
-# uri = "/webhooks/app-uninstalled"
-# topics = [ "app/uninstalled" ]
+
+[[webhooks.subscriptions]]
+uri = "/webhooks/app-uninstalled"
+topics = [ "app/uninstalled" ]
 
 [pos]
 embedded = false

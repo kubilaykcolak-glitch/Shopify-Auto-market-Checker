@@ -24,6 +24,7 @@ export default defineConfig({
   server: {
     port: Number(process.env.PORT || 3000),
     strictPort: true,
+    hmr: { overlay: false },
   },
   optimizeDeps: {
     include: ["@shopify/app-bridge-react"],
